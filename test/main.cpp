@@ -1,8 +1,49 @@
 #include <cassert>
 #include <modbus-register.h>
 #include <iostream>
+#include <vector>
+#include <print>
+#include <ranges>
 
 using namespace libmodbus_static;
+
+bool operator==(std::span<uint8_t> a, std::span<uint8_t> b) {
+	if (a.size() != b.size())
+		return false;
+	for (size_t i: std::ranges::iota_view{size_t(0), a.size()})
+		if (a[i] != b[i])
+			return false;
+	return true;
+}
+
+struct bitset_test {
+	bool a: 1{};
+	bool b: 1{};
+	bool c: 1{};
+	bool d: 1{};
+	bool e: 1{};
+	bool f: 1{};
+	bool g: 1{};
+	bool h: 1{};
+	bool i: 1{};
+	bool j: 1{};
+	bool k: 1{};
+	bool l: 1{};
+	bool m: 1{};
+	bool n: 1{};
+	bool o: 1{};
+	bool p: 1{};
+	bool q: 1{};
+	bool r: 1{};
+	bool s: 1{};
+	bool t: 1{};
+	bool u: 1{};
+	bool v: 1{};
+	bool w: 1{};
+	bool x: 1{};
+	bool y: 1{};
+	bool z: 1{};
+};
 
 #pragma pack(push, 1)
 struct example_layout {
@@ -34,24 +75,57 @@ struct example_layout {
 		uint16_t others{};
 	} halfs_write_registers;
 };
+struct test_layout {
+	struct halfs_layout {
+		constexpr static int OFFSET{0};
+		uint16_t r1{};
+		uint16_t r2{};
+		uint16_t r3{};
+		uint16_t r4{};
+	} halfs_registers;
+	struct halfs_write_layout {
+		constexpr static int OFFSET{0};
+		uint16_t r1{};
+		uint16_t r2{};
+		uint16_t r3{};
+		uint16_t r4{};
+	} halfs_write_registers;
+};
 #pragma pack(pop)
 using el = example_layout;
 
 int main() {
+	std::cout << "---------------------------------------------------------------------------------------\n";
+	std::cout << "Base tests\n";
+	std::cout << "---------------------------------------------------------------------------------------\n";
+	// checksum tests
+	std::vector<uint8_t> test{0x01, 0x04, 0x02, 0xFF, 0xFF};
+	uint16_t crc = checksum::calculate_crc16(test);
+	assert(crc == 0x80B8);
+	test = {0x01, 0x04, 0x02, 0xFF, 0xFF, 0xB8, 0x80};
+	crc = checksum::calculate_crc16(test);
+	assert(crc == 0);
+
+	static_assert(sizeof(bitset_test) > 2);
+	bitset_test bs{
+		.a = true,
+		.i = true,
+	};
+	std::span<uint8_t> bs_span{reinterpret_cast<uint8_t*>(&bs), sizeof(bs)};
+	std::println("Bytes {}, {}", bs_span, int('i' - 'a'));
+
 	static_assert(sizeof(example_layout::bits_registers) == 1);
 	static_assert(sizeof(example_layout::halfs_registers) == 46);
 	static_assert(sizeof(example_layout::halfs_write_registers) == 10);
 	static_assert(sizeof(example_layout) == 57);
 
-	modbus_register<example_layout>& modbus{modbus_register<example_layout>::Default(20)};
+	modbus_register<example_layout, 20>& modbus{modbus_register<example_layout, 20>::Default()};
+	
+	std::cout << "Done. \n\n";
 
-	mod_string<32> el::halfs_layout:: *a = &el::halfs_layout::string_field;
-	mod_string<32> t = el::halfs_layout{}.*a;
-
-
-	// ---------------------------------------------------------------------------------------
+	std::cout << "---------------------------------------------------------------------------------------\n";
 	std::cout << "Read/write tests\n";
-	// ---------------------------------------------------------------------------------------
+	std::cout << "---------------------------------------------------------------------------------------\n";
 	assert(modbus.addr == 20);
 	
 	std::string_view sv = to_string_view(modbus.read(MEMBER_CHAIN(example_layout, halfs, string_field)));
@@ -72,17 +146,128 @@ int main() {
 
 	std::cout << "Done.\n\n";
 
-	// ---------------------------------------------------------------------------------------
+	std::cout << "---------------------------------------------------------------------------------------\n";
 	std::cout << "Client tests\n";
-	// ---------------------------------------------------------------------------------------
-	
-	
-	std::cout << "Done.\n\n";
+	std::cout << "---------------------------------------------------------------------------------------\n";
 
-	// ---------------------------------------------------------------------------------------
+	modbus_register<test_layout, 0>& client_test{modbus_register<test_layout, 0>::Default()};
+
+	std::println("Test read register from read registers");
+	assert(client_test.start_rtu_frame(1) == OK);
+	auto [res, err] = client_test.get_frame_read(MEMBER_CHAIN_RANGE(test_layout, halfs, r1, r2));
+	assert(err == OK);
+	std::vector<uint8_t> valid_read_holding = {0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xc4, 0x0b};
+	std::vector<uint8_t> valid_read_response = {0x01, 0x03, 0x04, 0x00, 0x06, 0x00, 0x05, 0xda, 0x31};
+	std::println("should be: {:}", valid_read_holding);
+	std::println("is       : {:}", res);
+	assert(std::span<uint8_t>(valid_read_holding) == res);
+	std::println("Result bad crc");
+	client_test.switch_to_response();
+	for (uint8_t b: (valid_read_response | std::ranges::views::take(valid_read_response.size() - 1)))
+		assert(client_test.process_rtu(b).err == IN_PROGRESS);
+	assert(client_test.process_rtu(0x20).err == INVALID_CRC);
+	std::println("Result bad return size");
+	client_test.switch_to_response();
+	std::vector<uint8_t> invalid_read_response = {0x01, 0x03, 0x02, 0x00, 0x06};
+	for (uint8_t b: invalid_read_response)
+		assert(client_test.process_rtu(b).err == IN_PROGRESS);
+	uint16_t cs = checksum::calculate_crc16(client_test.buffer.frame_data.span());
+	assert(client_test.process_rtu(l_byte(cs)).err == IN_PROGRESS);
+	assert(client_test.process_rtu(h_byte(cs)).err == INVALID_RESPONSE);
+	std::println("Valid response");
+	client_test.switch_to_response();
+	for (uint8_t b: (valid_read_response | std::ranges::views::take(valid_read_response.size() - 1)))
+		assert(client_test.process_rtu(b).err == IN_PROGRESS);
+	assert(client_test.process_rtu(valid_read_response.back()).err == OK);
+	assert(client_test.read(MEMBER_CHAIN(test_layout, halfs, r1)) == 6);
+	assert(client_test.read(MEMBER_CHAIN(test_layout, halfs, r2)) == 5);
+
+	std::println("\nTest read single register from write registers");
+	client_test.write(uint16_t(44), MEMBER_CHAIN(test_layout, halfs_write, r1));
+	assert(client_test.start_rtu_frame(1) == OK);
+	r_tie(res, err) = client_test.get_frame_read(MEMBER_CHAIN(test_layout, halfs_write, r1));
+	assert(err == OK);
+	std::vector<uint8_t> valid_read_input = {0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 49, 202};
+	std::vector<uint8_t> valid_read_response_input = {0x01, 0x04, 0x02, 0x00, 0x00, 0xb9, 0x30};
+	std::println("should be: {:}", valid_read_input);
+	std::println("is       : {:}", res);
+	assert(std::span<uint8_t>(valid_read_input) == res);
+	std::println("Valid response");
+	client_test.switch_to_response();
+	for (uint8_t b: (valid_read_response_input | std::ranges::views::take(valid_read_response_input.size() - 1)))
+		assert(client_test.process_rtu(b).err == IN_PROGRESS);
+	assert(client_test.process_rtu(valid_read_response_input.back()).err == OK);
+	assert(client_test.read(MEMBER_CHAIN(test_layout, halfs_write, r1)) == 0);
+
+	std::println("\nTest write single register");
+	// invalid target register
+	assert(client_test.start_rtu_frame(2) == OK);
+	r_tie(res, err) = client_test.get_frame_write(MEMBER_CHAIN(test_layout, halfs, r1));
+	assert(err == "HALFS_NOT_ALLOWED");
+	client_test.write(uint16_t(3), MEMBER_CHAIN(test_layout, halfs_write, r1));
+	assert(client_test.start_rtu_frame(17) == OK);
+	r_tie{res, err} = client_test.get_frame_write(MEMBER_CHAIN(test_layout, halfs_write, r1));
+	assert(err == OK);
+	std::vector<uint8_t> solution1 = {0x11, 0x06, 0x00, 0x00, 0x00, 0x03, 203, 91};
+	std::println("should be: {:}", solution1);
+	std::println("is       : {:}", res);
+	assert(std::span<uint8_t>(solution1) == res);
+	std::println("Check response frame for validity, bad frame");
+	assert(client_test.process_rtu(solution1[0]).err == "NO_WRITE_IN_FINAL_STATE");
+	client_test.switch_to_response();
+	// bad checksum
+	assert(client_test.process_rtu(solution1[0]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[1]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[2]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[3]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[4]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[5]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[6]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(16).err == INVALID_CRC);
+
+	// bad response
+	assert(client_test.process_rtu(solution1[0]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[1]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[2]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[3]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1[4]).err == IN_PROGRESS);
+	assert(client_test.process_rtu(42).err == IN_PROGRESS);
+	cs = checksum::calculate_crc16(client_test.buffer.frame_data.span());
+	assert(client_test.process_rtu(l_byte(cs)).err == IN_PROGRESS);
+	assert(client_test.process_rtu(h_byte(cs)).err == INVALID_RESPONSE);
+
+	// correct response
+	for (uint8_t b: (solution1 | std::ranges::views::take(solution1.size() - 1)))
+		assert(client_test.process_rtu(b).err == IN_PROGRESS);
+	assert(client_test.process_rtu(solution1.back()).err == OK);
+	
+	std::println("Done.\n");
+
+	std::cout << "---------------------------------------------------------------------------------------\n";
 	std::cout << "Server tests\n";
-	// ---------------------------------------------------------------------------------------
-	//
-	std::cout << "Done.\n\n";
+	std::cout << "---------------------------------------------------------------------------------------\n";
+
+	std::println("\nRead halfs");
+	modbus_register<test_layout, 1>& test_server{modbus_register<test_layout, 1>::Default()};
+
+	std::println("Bad address");
+	client_test.start_rtu_frame(31);
+	r_tie{res, err} = client_test.get_frame_read(MEMBER_CHAIN_RANGE(test_layout, halfs, r3, r4));
+	assert(err == OK);
+	std::println("Read halfs frame: {}", res);
+	for (uint8_t b: res | std::ranges::views::take(res.size() - 1))
+		assert(test_server.process_rtu(b).err == IN_PROGRESS);
+	assert(test_server.process_rtu(res.back()).err == WRONG_ADDR);
+
+	std::println("Valid read halfs");
+	client_test.start_rtu_frame(1);
+	r_tie{res, err} = client_test.get_frame_read(MEMBER_CHAIN_RANGE(test_layout, halfs, r3, r4));
+	std::println("Read halfs frame: {}", res);
+	assert(err == OK);
+	for (uint8_t b: res | std::ranges::views::take(res.size() - 1))
+		assert(test_server.process_rtu(b).err == IN_PROGRESS);
+	assert(test_server.process_rtu(res.back()).err == OK);
+	
+	std::println("Done.\n");
 }
 

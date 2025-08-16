@@ -5,6 +5,9 @@
 #include <string_view>
 #include <inttypes.h>
 
+//TODO: remove
+#include <iostream>
+
 // Modbus frames
 //
 // Modbus RTU
@@ -31,7 +34,8 @@
 namespace libmodbus_static {
 
 using result = std::string_view;
-constexpr std::string_view OK{"ok"};
+constexpr std::string_view OK{"OK"};
+constexpr std::string_view INVALID_CRC{"CRC_CHECK_FAILED"};
 constexpr inline uint8_t h_byte(uint16_t h) { return (h >> 8) & 0xff; }
 constexpr inline uint8_t l_byte(uint16_t h) { return h & 0xff; }
 
@@ -62,6 +66,16 @@ enum struct function_code : uint8_t {
 	WRITE_MULTIPLE_COILS = 15,       ///< Write multiple coils - FC 15 (0x0F)
 	WRITE_MULTIPLE_REGISTERS = 16,   ///< Write multiple registers - FC 16 (0x10)
 };
+
+struct type {
+	bool REQUEST: 1{};
+	bool RESPONSE: 1{};
+	bool EXCEPTION: 1{};
+};
+inline bool fc_requires_length(function_code fc, type t)  {
+	return (t.REQUEST && (fc == function_code::WRITE_MULTIPLE_COILS || fc == function_code::WRITE_MULTIPLE_REGISTERS))
+			|| (t.RESPONSE && (fc >= function_code::READ_COILS && fc <= function_code::READ_INPUT_REGISTERS));
+}
 
 /**
  * @brief Modbus exception codes returned in error responses
@@ -130,23 +144,21 @@ struct static_byte_vector {
 	constexpr void clear() { cur_size = 0; }
 	constexpr bool empty() const { return cur_size == 0; }
 	constexpr int size() const { return cur_size; }
-	constexpr std::span<uint8_t> span() const { return {storage.data(), cur_size}; }
+	constexpr std::span<uint8_t> span() { return {begin(), end()}; }
 };
 
 template<int MAX_SIZE = 256>
 struct modbus_frame {
 	enum struct state {
-		WRITE_ADDR_START_MBAP,
-		WRITE_ADDR,
-		WRITE_FC,
-		WRITE_DATA_EC,
-		WRITE_DATA,
-		WRITE_CRC,
-		FINAL,
-	};
-	enum struct type {
-		NORMAL,
-		EXCEPTION,
+		WRITE_ADDR_START_MBAP = 0,
+		WRITE_ADDR = 1,
+		WRITE_FC = 2,
+		WRITE_LENGTH = 3,
+		WRITE_DATA_EC = 4,
+		WRITE_DATA = 5,
+		WRITE_CRC_0 = 6,
+		WRITE_CRC_1 = 7,
+		FINAL = 8,
 	};
 	struct mbap_header {
 		uint16_t transaction_id{}; ///< Transaction identifier for matching requests/responses
@@ -159,19 +171,37 @@ struct modbus_frame {
 	mbap_header *tcp_header{};
 	uint8_t *addr{};
 	uint8_t *fc{};
+	uint8_t *byte_count{};
 	uint8_t *ec{};
-	std::span<uint8_t> data{};
+	uint8_t *data{};
+	type t{.REQUEST = true};
 	constexpr void clear() {
 		cur_state = state::WRITE_ADDR_START_MBAP;
 		frame_data.clear();
 		tcp_header = {};
 		addr = {};
 		fc = {};
+		byte_count = {};
 		data = {};
+		t = {.REQUEST = true};
 	}
+	constexpr bool is_ascii() const { return frame_data[0] == ':'; }
+	constexpr bool is_tcp() const { return tcp_header; }
+	constexpr bool is_rtu() const { return addr && !is_ascii() && !is_tcp(); }
+	constexpr void set_type(type t) { this->t = t; }
 	// ---------------------------------------------------------------------------------------
 	// Write functions
 	// ---------------------------------------------------------------------------------------
+	constexpr int missing_data_bytes() {
+		if (!fc)
+			return -1;
+		bool requires_length = fc_requires_length(function_code(*fc), t);
+		if (requires_length && !byte_count)
+			return -1;
+		if (requires_length)
+			return (*byte_count - (frame_data.end() - byte_count) + 1);
+		return 5 - (frame_data.end() - fc);
+	}
 	constexpr result write_ascii_start() {
 		RESULT_ASSERT(cur_state == state::WRITE_ADDR_START_MBAP, "STATE_NOT_WRITE_START");
 		RESULT_ASSERT(frame_data.push(':'), "WRITE_ASCII_START_FAILED");
@@ -196,85 +226,96 @@ struct modbus_frame {
 		cur_state = state::WRITE_FC;
 		return OK;
 	}
-	constexpr result write_fc(function_code fc, type t = type::NORMAL) {
+	constexpr result write_fc(function_code fc, type t = type{.REQUEST = true}) {
 		RESULT_ASSERT(cur_state == state::WRITE_FC, "STATE_NOT_WRITE_FC");
 		RESULT_ASSERT(fc >= function_code::NONE && fc <= function_code::WRITE_MULTIPLE_REGISTERS,
 				"INVALID_FUNCTION_CODE");
-		if (t == type::EXCEPTION)
+		if (t.EXCEPTION)
 			reinterpret_cast<uint8_t&>(fc) |= 0x80;
 		this->fc = frame_data.end();
-		RESULT_ASSERT(frame_data.push(fc), "WRITE_FC_FAILED");
-		cur_state = state::WRITE_DATA_EC;
+		RESULT_ASSERT(frame_data.push(uint8_t(fc)), "WRITE_FC_FAILED");
+		if (fc_requires_length(fc, t))
+			cur_state = state::WRITE_LENGTH;
+		else
+			cur_state = state::WRITE_DATA_EC;
+		return OK;
+	}
+	constexpr result write_length(uint8_t l) {
+		RESULT_ASSERT(cur_state == state::WRITE_LENGTH, "STATE_NOT_WRITE_LENGTH");
+		byte_count = frame_data.end();
+		RESULT_ASSERT(frame_data.push(l), "WRITE_LENGTH_FAILED");
+		cur_state = state::WRITE_DATA;
+		return OK;
+	}
+	constexpr result write_data(uint8_t data) {
+		RESULT_ASSERT(cur_state == state::WRITE_DATA_EC || cur_state == state::WRITE_DATA, 
+				"STATE_NOT_WRITE_DATA");
+		if (!this->data)
+			this->data = frame_data.end();
+		RESULT_ASSERT(frame_data.push(data), "WRITE_DATA_FAILED");
+		int missing_bytes = missing_data_bytes();
+		if (missing_bytes == 0 && tcp_header)
+			cur_state = state::FINAL;
+		else if (missing_bytes == 0)
+			cur_state = state::WRITE_CRC_0;
+		else
+			cur_state = state::WRITE_DATA;
 		return OK;
 	}
 	constexpr result write_data(std::span<uint8_t> data) {
-		RESULT_ASSERT(cur_state == state::WRITE_DATA_EC || cur_state == state::WRITE_DATA, 
-				"STATE_NOT_WRITE_DATA");
 		for (uint8_t b: data)
-			RESULT_ASSERT(frame_data.push(b), "WRITE_DATA_FAILED");
-		cur_state = state::WRITE_DATA;
+			RESULT_ASSERT(write_data(b) == OK, "WRITE_DATA_FAILED");
 		return OK;
 	}
 	constexpr result write_ec(exception_code ec) {
 		RESULT_ASSERT(cur_state == state::WRITE_DATA_EC, "STATE_NOT_WRITE_EC");
 		this->ec = frame_data.end();
 		RESULT_ASSERT(frame_data.push(ec), "WRITE_EC_FAILED");
-		cur_state = state::WRITE_CRC;
+		cur_state = state::WRITE_CRC_0;
 		return OK;
 	}
 	constexpr result write_checksum(uint16_t crc) {
-		RESULT_ASSERT(cur_state == state::WRITE_CRC, "STATE_NOT_WRITE_CRC");
-		RESULT_ASSERT(frame_data.push(h_byte(crc)), "FAILED_CRC_WRITE_0");
-		RESULT_ASSERT(frame_data.push(l_byte(crc)), "FAILED_CRC_WRITE_1");
+		RESULT_ASSERT(cur_state == state::WRITE_CRC_0, "STATE_NOT_WRITE_CRC");
+		RESULT_ASSERT(frame_data.push(l_byte(crc)), "FAILED_CRC_WRITE_0");
+		RESULT_ASSERT(frame_data.push(h_byte(crc)), "FAILED_CRC_WRITE_1");
 		cur_state = state::FINAL;
+		RESULT_ASSERT(checksum::calculate_crc16(frame_data.span()) == 0, INVALID_CRC);
+		return OK;
+	}
+	constexpr result write_checksum(uint8_t crc) {
+		RESULT_ASSERT(cur_state == state::WRITE_CRC_0 || cur_state == state::WRITE_CRC_1,
+			"STATE_NOT_WRITE_CRC");
+		RESULT_ASSERT(frame_data.push(crc), "FAILED_CRC_WRITE");
+		if (cur_state == state::WRITE_CRC_0)
+			cur_state = state::WRITE_CRC_1;
+		else
+			cur_state = state::FINAL;
+		if (cur_state == state::FINAL)
+			RESULT_ASSERT(checksum::calculate_crc16(frame_data.span()) == 0, INVALID_CRC);
 		return OK;
 	}
 	// ---------------------------------------------------------------------------------------
 	// Receive functions
 	// ---------------------------------------------------------------------------------------
-	constexpr result receive_byte(uint8_t b) {
-		RESULT_ASSERT(frame_data.push(b), "RECEIVE_BYTE_FAILED");
-		return OK;
-	}
-	constexpr result parse_rtu_frame() {
-		RESULT_ASSERT(frame_data.size() < 4, "INVALID_RTU_FRAME");
-		RESULT_ASSERT(checksum::calculate_crc16(frame_data.span()) == 0, "INVALID_RTU_CRC");
-
-		addr = &frame_data[0];
-		fc = &frame_data[1];
-		bool is_exception = uint8_t(fc) & 0x80;
-		if (is_exception) {
-			*fc &= 0x7f;
-			ec = &frame_data[2];
-		} else {
-			data = {&frame_data[2], &frame_data[frame_data.size() - 2]};
+	constexpr result process(uint8_t b) {
+		switch (cur_state) {
+		case modbus_frame<MAX_SIZE>::state::WRITE_ADDR_START_MBAP:
+		case modbus_frame<MAX_SIZE>::state::WRITE_ADDR:
+			return write_addr(b);
+		case modbus_frame<MAX_SIZE>::state::WRITE_FC:
+			return write_fc(function_code(b), t);
+		case modbus_frame<MAX_SIZE>::state::WRITE_LENGTH:
+			return write_length(b);
+		case modbus_frame<MAX_SIZE>::state::WRITE_DATA:
+		case modbus_frame<MAX_SIZE>::state::WRITE_DATA_EC:
+			return write_data(b);
+		case modbus_frame<MAX_SIZE>::state::WRITE_CRC_0:
+		case modbus_frame<MAX_SIZE>::state::WRITE_CRC_1:
+			return write_checksum(b);
+		case modbus_frame<MAX_SIZE>::state::FINAL:
+			return "NO_WRITE_IN_FINAL_STATE";
 		}
-
-		return OK;
-	}
-	constexpr result parse_ascii_frame(std::span<uint8_t> frame) {
-		RESULT_ASSERT(false, "Not yet implemented");
-		RESULT_ASSERT(frame_data.size() < 5, "INVALID_ASCII_FRAME");
-		RESULT_ASSERT(frame_data[0] == ':', "INVALID_ASCII_FRAME_START");
-		RESULT_ASSERT(checksum::calculate_crc16(frame_data.span()) == 0, "INVALID_ASCII_CRC");
-
-
-		return OK;
-	}
-	constexpr result parse_tcp_frame(std::span<uint8_t> frame) {
-		RESULT_ASSERT(frame_data.size() < 9, "INVALID_TCP_FRAME");
-
-		tcp_header = reinterpret_cast<mbap_header*>(&frame[0]);
-		fc = &tcp_header->fc;
-		bool is_exception = *fc & 0x80;
-		if (is_exception) {
-			*fc &= 0x7f;
-			ec = &frame_data[8];
-		} else {
-			data = {&frame_data[8], &frame_data.back()};
-		}
-
-		return OK;
+		return "INVALID_STATE";
 	}
 };
 
