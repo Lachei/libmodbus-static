@@ -1,10 +1,14 @@
-#include <tcp-server.h>
+#include "fronius-meter-sunspec-layout.h"
+#include <modbus-register.h>
 #include <ranges>
 #include <print>
 #include <atomic>
 
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+
+using namespace libmodbus_static;
 
 void print_usage() {
 	std::println(R"(
@@ -14,18 +18,17 @@ modbus-tcp-linux-server [--port,-p PORT=502]
 )");
 }
 
-static std::atomic<bool>& RunningSingleton() {
-	static std::atomic<bool> is_running{true};
-	return is_running;
-}
+static std::atomic<bool>& RunningSingleton() { static std::atomic<bool> is_running{true}; return is_running; }
+static int& TcpSocketSingleton() { static int socket{}; return socket; }
 
 void sig_handler(int) {
 	RunningSingleton() = false;
+	close(TcpSocketSingleton());
 }
 
 int create_tcp_socket(int port) {
 	struct sockaddr_in addr;
-	int fd;
+	int &fd = TcpSocketSingleton();
 
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if(fd == -1)
@@ -41,16 +44,23 @@ int create_tcp_socket(int port) {
 
 	if(bind(fd, (struct sockaddr *)&addr,sizeof(struct sockaddr_in) ) == -1)
 	{
-		std::println("Error binding socket");
+		std::println("Error binding socket on port {}", port);
 		return -1;
 	}
 
-	std::println("Successfully bound to port {:x}", port);
+	if (0 > listen(fd, 10)) {
+		std::println("Listen on the socket failed");
+		return -1;
+	}
+
+	std::println("Successfully bound tcp socket to port {}", port);
+	return fd;
 }
 
 int main(int argc, char **argv) {
 	signal(SIGINT, sig_handler);
-	if (argc > 2) {
+	if (argc > 3) {
+		std::println("Error too many arguments: {}", argc);
 		print_usage();
 		return EXIT_FAILURE;
 	}
@@ -59,18 +69,56 @@ int main(int argc, char **argv) {
 	for (int i: std::ranges::iota_view{0, argc}) {
 		if ((argv[i] == std::string_view("--port") ||
       			argv[i] == std::string_view("-p")) && i + 1 < argc)
-			port = std::strtol(argv[i + 1]);
+			port = std::strtol(argv[i + 1], nullptr, 0);
 	}
 	
 	int tcp_socket = create_tcp_socket(port);
 	if (tcp_socket == -1)
 		return EXIT_FAILURE;
 
-
+	auto modbus_server = modbus_register<fronius_meter::layout, 1>::Default();
 
 	while (RunningSingleton()) {
-		
+		// get buffer data
+		struct sockaddr_in s_addr;
+		struct sockaddr_in c_addr;
+		socklen_t s = sizeof(s_addr);
+		int c = accept(tcp_socket, reinterpret_cast<struct sockaddr*>(&c_addr), &s);
+		if (c <= 0) {
+			std::println("Accept error");
+			close(c);
+			continue;
+		}
+		std::array<uint8_t, 1024> buf{};
+		int len{};
+		if (0 > (len = recv(c, buf.data(), buf.size() -1, 0))) {
+			close(c);
+		}
+		std::println("Got frame: {}", std::span(buf.data(), len));
+		// execute modbus response
+		for(int i: std::ranges::iota_view{0, len}) {
+			std::string_view r = modbus_server.process_tcp(buf[i]).err;
+			if (r == IN_PROGRESS)
+				continue;
+			if (r != OK) {
+				std::println("Modbus parsing failed with {}", r);
+				continue;
+			}
+			auto [res, err] = modbus_server.get_frame_response();
+			if (err != OK) {
+				std::println("Modbus generating response failed with {}", err);
+				continue;
+			}
+			send(tcp_socket, res.data(), res.size(), 0);
+			modbus_server.switch_to_request();
+		}
+		// close connection for next request
+		close(c);
 	}
+
+	std::println("Modbus server done, shutting down");
+
+	close(tcp_socket);
 
 	return EXIT_SUCCESS;
 }
