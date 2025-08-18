@@ -52,6 +52,19 @@ struct swap_byte_order<T> {
 		dst = src;
 	}
 };
+template<typename T>
+constexpr static result is_register_covered(uint32_t reg_offset, uint32_t reg_count) {
+	constexpr int START = T::OFFSET;
+	constexpr int END = START + sizeof(T) / 2;
+	if (reg_offset < START || END < reg_offset + reg_count)
+		return "REGISTER_NOT_FULLY_COVERED";
+	return OK;
+}
+template<typename T>
+constexpr static uint8_t* get_start_addr(T &r, uint32_t reg_offset) {
+	constexpr int START = T::OFFSET;
+	return reinterpret_cast<uint8_t*>(&r) + (reg_offset - START) * 2;
+}
 
 constexpr std::string_view IN_PROGRESS{"IN_PROGRESS"};
 constexpr std::string_view INVALID_RESPONSE{"RESPONSE_FROM_SERVER_INVALID"};
@@ -101,10 +114,6 @@ struct r_tie {
  * #pragma pack(pop)
  */
 
-template<typename S, typename M>
-using mem_t = std::decay_t<decltype(std::declval<S>().*std::declval<M>())>;
-template<typename L, typename S, typename M>
-concept IsMemberChain = requires (L l, S s, M m) { l.*s.*m; };
 template<typename L, typename S>
 concept IsBitsRegisters = requires (L l, S s) {l.bits_registers = s;} || requires(L l, S s) {l.bits_write_registers = s;};
 template<typename S>
@@ -117,18 +126,56 @@ template<typename L>
 concept HasHalfs = requires(L l) { l.halfs_registers; };
 template<typename L>
 concept HasWriteHalfs = requires(L l) { l.halfs_write_registers; };
-template<typename L, typename R>
-constexpr register_t type_to_register() { 
-	static_assert(false, "The type could not be converted, make sure your layout has the correct members"); 
-	return register_t::NONE;
-}
-template<typename L, typename R> requires requires (L l, R r) {l.bits_registers = r;}
+
+template<typename L, typename Mp>
+concept IsBitsRegister = requires(L l, Mp m) { l.bits_registers.*m; };
+template<typename L, typename Mp>
+concept IsBitsWriteRegister = requires(L l, Mp m) { l.bits_write_registers.*m; };
+template<typename L, typename Mp>
+concept IsHalfsRegister = requires(L l, Mp m) { l.halfs_registers.*m; };
+template<typename L, typename Mp>
+concept IsHalfsWriteRegister = requires(L l, Mp m) { l.halfs_write_registers.*m; };
+template<typename L, typename Mp>
+concept IsValidRegister = IsBitsRegister<L, Mp> || IsBitsWriteRegister<L, Mp> || IsHalfsRegister<L, Mp> || IsHalfsWriteRegister<L, Mp>;
+
+template<typename L, typename Mp> requires IsBitsRegister<L, Mp>
+constexpr decltype(std::declval<L>().bits_registers) RegisterTypeH();
+template<typename L, typename Mp> requires IsBitsWriteRegister<L, Mp>
+constexpr decltype(std::declval<L>().bits_write_registers) RegisterTypeH();
+template<typename L, typename Mp> requires IsHalfsRegister<L, Mp>
+constexpr decltype(std::declval<L>().halfs_registers) RegisterTypeH();
+template<typename L, typename Mp> requires IsHalfsWriteRegister<L, Mp>
+constexpr decltype(std::declval<L>().halfs_write_registers) RegisterTypeH();
+template<typename L, typename Mp>
+using RegisterType = std::decay_t<decltype(RegisterTypeH<L, Mp>())>;
+template<typename L, typename Mp>
+using MemberType = std::decay_t<decltype(std::declval<RegisterType<L,Mp>>().*std::declval<Mp>())>;
+
+template<typename L, typename Mp> requires IsBitsRegister<L, Mp>
+constexpr uint32_t OFFSET() { return decltype(std::declval<L>().bits_registers)::OFFSET; }
+template<typename L, typename Mp> requires IsBitsWriteRegister<L, Mp>
+constexpr uint32_t OFFSET() { return decltype(std::declval<L>().bits_write_registers)::OFFSET; }
+template<typename L, typename Mp> requires IsHalfsRegister<L, Mp>
+constexpr uint32_t OFFSET() { return decltype(std::declval<L>().halfs_registers)::OFFSET; }
+template<typename L, typename Mp> requires IsHalfsWriteRegister<L, Mp>
+constexpr uint32_t OFFSET() { return decltype(std::declval<L>().halfs_write_registers)::OFFSET; }
+
+template<typename L, typename Mp> requires IsBitsRegister<L, Mp>
+constexpr RegisterType<L, Mp>& register_ref(L &l) { return l.bits_registers; }
+template<typename L, typename Mp> requires IsBitsWriteRegister<L, Mp>
+constexpr RegisterType<L, Mp>& register_ref(L &l) { return l.bits_write_registers; }
+template<typename L, typename Mp> requires IsHalfsRegister<L, Mp>
+constexpr RegisterType<L, Mp>& register_ref(L &l) { return l.halfs_registers; }
+template<typename L, typename Mp> requires IsHalfsWriteRegister<L, Mp>
+constexpr RegisterType<L, Mp>& register_ref(L &l) { return l.halfs_write_registers; }
+
+template<typename L, typename Mp> requires IsBitsRegister<L, Mp>
 constexpr register_t type_to_register() { return register_t::BITS; }
-template<typename L, typename R> requires requires (L l, R r) {l.bits_write_registers = r;}
+template<typename L, typename Mp> requires IsBitsWriteRegister<L, Mp>
 constexpr register_t type_to_register() { return register_t::BITS_WRITE; }
-template<typename L, typename R> requires requires (L l, R r) {l.halfs_registers = r;}
+template<typename L, typename Mp> requires IsHalfsRegister<L, Mp>
 constexpr register_t type_to_register() { return register_t::HALFS; }
-template<typename L, typename R> requires requires (L l, R r) {l.halfs_write_registers = r;}
+template<typename L, typename Mp> requires IsHalfsWriteRegister<L, Mp>
 constexpr register_t type_to_register() { return register_t::HALFS_WRITE; }
 template<typename L, typename R>
 constexpr R& get_register_ref(L &l) { 
@@ -150,6 +197,7 @@ struct modbus_register {
 	Layout storage{}; // do not access directly, contains data already byte swapped, read and write with read() and write()
 	modbus_frame<MAX_SIZE> buffer{};
 	struct last_completed{
+		transport_t transport{};
 		uint8_t addr{};
 		function_code fc{};
 		uint16_t i1{};
@@ -184,21 +232,21 @@ struct modbus_register {
 		return {.err = "NOT_YET_IMPLEMENTED"};
 	}
 	constexpr result_err process_tcp(uint8_t b) {
-		if (buffer.cur_state == modbus_frame<MAX_SIZE>::state::WRITE_ADD_START_MBAP) {
-			if (storage.frame_data.size() > sizeof(*storage.frame_data.tcp_header)) {
-				storage.clear();
+		if (buffer.cur_state == modbus_frame<MAX_SIZE>::state::WRITE_ADDR_START_MBAP) {
+			if (buffer.frame_data.size() > sizeof(*buffer.tcp_header)) {
+				buffer.clear();
 				return {.err = "FATAL_TOO_LARGE_SIZE_FOR_TCP_HEADER"};
 			}
-			result r = buffer.frame_data.push(b);
-			if (r != OK) {
+			if (!buffer.frame_data.push(b)) {
 				buffer.clear();
-				return {.err = r};
+				return {.err = "ERR_WRITE_TCP_HEADER"};
 			}
 			// done with tcp header recieving
-			if (buffer.frame_data.size() == sizeof(*buffer.frame_data.tcp_header)) {
-				buffer.frame_data.tcp_header = reinterpret_cast<modbus_frame<MAX_SIZE>::mbap_header*>(buffer.frame_data.frame_data.data());
-				uint16_t l = buffer.frame_data.tcp_header->length;
-				buffer.frame_data.tcp_header->length = (l_byte(l) << 8) | h_byte(l);
+			if (buffer.frame_data.size() == sizeof(*buffer.tcp_header)) {
+				buffer.transport = transport_t::TCP;
+				buffer.tcp_header = reinterpret_cast<modbus_frame<MAX_SIZE>::mbap_header*>(buffer.frame_data.begin());
+				uint16_t l = buffer.tcp_header->length;
+				buffer.tcp_header->length = (l_byte(l) << 8) | h_byte(l);
 				buffer.cur_state = modbus_frame<MAX_SIZE>::state::WRITE_ADDR;
 			}
 			return {.err = IN_PROGRESS};
@@ -207,7 +255,7 @@ struct modbus_register {
 			buffer.clear();
 			return {.err = "FATAL_MISSING_TCP_HEADER_IN_FRAME"};
 		}
-		if (buffer.frame_data.size() > buffer.tcp_header->lenngth + sizeof(*buffer.frame_data.tcp_header)) {
+		if (buffer.frame_data.size() > buffer.tcp_header->length + sizeof(*buffer.tcp_header)) {
 			buffer.clear();
 			return {.err = "FATAL_TCP_FRAME_LENGTH_FULL"};
 		}
@@ -227,24 +275,27 @@ struct modbus_register {
 	}
 	constexpr result start_tcp_frame(uint16_t trans, uint8_t addr) {
 		buffer.clear();
-		typename modbus_frame<MAX_SIZE>::mbap_header header{.transactionId = trans, .addreess = addr};
-		return buffer.write_mbap(header);
+		result r = buffer.write_mbap({.transaction_id = trans});
+		if (r != OK)
+			return r;
+		return buffer.write_addr(addr);
 	}
+	constexpr std::span<const uint8_t> get_current_frame() const { return buffer.frame_data.span();}
 
-	template<typename Reg, typename MemA, typename MemB>
-	requires IsMemberChain<Layout, Reg, MemA> && IsMemberChain<Layout, Reg, MemB> && HasOffset<mem_t<Layout, Reg>>
-	constexpr result_err get_frame_read(Reg reg, MemA member_a, MemB member_b) {
-		using Register = std::decay_t<decltype(storage.*reg)>;
+	template<typename MemA, typename MemB>
+	requires IsValidRegister<Layout, MemA> && IsValidRegister<Layout, MemB>
+	constexpr result_err get_frame_read(MemA member_a, MemB member_b) {
+		auto reg = register_ref<Layout, MemA>(storage);
 		uint32_t start_str = to_uint_ptr(member_a);
-		uint32_t end_str = to_uint_ptr(member_b) + sizeof(storage.*reg.*member_b);
-		uint32_t start_reg = start_str / sizeof(uint16_t) + Register::OFFSET;
-		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&(storage.*reg));
-		register_t reg_type = type_to_register<Layout, Register>();
+		uint32_t end_str = to_uint_ptr(member_b) + sizeof(reg.*member_b);
+		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
+		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
+		register_t reg_type = type_to_register<Layout, MemA>();
 		return _get_frame_read_req(reg_type, start_reg, (end_str - start_str) / sizeof(uint16_t));
 	}
-	template<typename Reg, typename Mem>
-	requires IsMemberChain<Layout, Reg, Mem> && HasOffset<mem_t<Layout, Reg>>
-	constexpr result_err get_frame_read(Reg reg, Mem mem) { return get_frame_read<Reg, Mem, Mem>(reg, mem, mem); };
+	template<typename Mem>
+	requires IsValidRegister<Layout, Mem>
+	constexpr result_err get_frame_read(Mem mem) { return get_frame_read<Mem, Mem>(mem, mem); };
 
 	template<typename Reg>
 	requires IsBitsRegisters<Layout, Reg>
@@ -268,21 +319,21 @@ struct modbus_register {
 	requires IsBitsRegisters<Layout, Reg>
 	constexpr result_err get_frame_read(const Reg &read_mask) { return get_frame_read(read_mask, read_mask); }
 
-	template<typename Reg, typename MemA, typename MemB>
-	requires IsMemberChain<Layout, Reg, MemA> && IsMemberChain<Layout, Reg, MemB> && HasOffset<mem_t<Layout, Reg>>
-	constexpr result_err get_frame_write(Reg reg, MemA member_a, MemB member_b) {
-		using Register = std::decay_t<decltype(storage.*reg)>;
-		register_t type = type_to_register<Layout, Register>();
+	template<typename MemA, typename MemB>
+	requires IsValidRegister<Layout, MemA> && IsValidRegister<Layout, MemB>
+	constexpr result_err get_frame_write(MemA member_a, MemB member_b) {
+		auto reg = register_ref<Layout, MemA>(storage);
+		register_t type = type_to_register<Layout, MemA>();
 		uint32_t start_str = to_uint_ptr(member_a);
-		uint32_t end_str = to_uint_ptr(member_b) + sizeof(storage.*reg.*member_b);
-		uint32_t start_reg = start_str / sizeof(uint16_t) + Register::OFFSET;
-		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&(storage.*reg));
+		uint32_t end_str = to_uint_ptr(member_b) + sizeof(reg.*member_b);
+		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
+		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
 		return _get_frame_write_req(type, start_reg, std::span<uint8_t>{str_addr + start_str, str_addr + end_str});
 	}
 
-	template<typename Reg, typename Mem>
-	requires IsMemberChain<Layout, Reg, Mem> && HasOffset<mem_t<Layout, Reg>>
-	constexpr result_err get_frame_write(Reg reg, Mem mem) { return get_frame_write<Reg, Mem, Mem>(reg, mem, mem); }
+	template<typename Mem>
+	requires IsValidRegister<Layout, Mem>
+	constexpr result_err get_frame_write(Mem mem) { return get_frame_write<Mem, Mem>(mem, mem); }
 
 	template<typename Reg>
 	requires IsBitsRegisters<Layout, Reg>
@@ -304,18 +355,108 @@ struct modbus_register {
 	requires IsBitsRegisters<Layout, Reg>
 	constexpr result_err get_frame_write(const Reg &read_mask) { return get_frame_write(read_mask, read_mask); }
 
-	template<typename Reg, typename Mem, typename MemT = mem_t<mem_t<Layout, Reg>, Mem>>
-	requires IsMemberChain<Layout, Reg, Mem>
-	constexpr MemT read(Reg src_reg, Mem src) {
+	#define RES_ERR_ASSERT(cond, msg) if (cond != OK) {buffer.clear(); return {.err = msg};}
+	#define RES_FORWARD(stm) if (result r = stm; r != OK) {buffer.clear(); return {.err = r};}
+	#define RES_BOOL_ASSERT(cond, msg) if (!(cond)) {buffer.clear(); return {.err = msg};}
+	constexpr result_err get_frame_response() {
+		if (buffer.cur_state != modbus_frame<MAX_SIZE>::state::FINAL)
+			return {.err = "FRAME_NOT_DONE"};
+
+		// header information
+		uint16_t reg_offset = (l_byte(lc.i1) << 8) | h_byte(lc.i1);
+		uint16_t reg_count = (l_byte(lc.i2) << 8) | h_byte(lc.i2);
+		uint16_t tcp_tid = buffer.tcp_header ? buffer.tcp_header->transaction_id: 0;
+		swap_byte_order<uint16_t>{}(tcp_tid, tcp_tid);
+		switch_to_response();
+		switch(lc.transport) {
+		case transport_t::ASCII: RES_FORWARD(buffer.write_ascii_start()); break;
+		case transport_t::TCP: RES_FORWARD(buffer.write_mbap({tcp_tid})); break;
+		}
+		RES_FORWARD(buffer.write_addr(lc.addr));
+		RES_FORWARD(buffer.write_fc(lc.fc));
+
+		// data information
+		switch(function_code(*buffer.fc)) {
+		case function_code::READ_COILS:
+			// TODO: implement
+			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		case function_code::READ_DISCRETE_INPUTS:
+			// TODO: implement
+			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		case function_code::READ_HOLDING_REGISTERS:
+			if constexpr (!HasHalfs<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_HALFS"};
+			} else {
+				RES_FORWARD(is_register_covered<decltype(storage.halfs_registers)>(reg_offset, reg_count));
+				RES_FORWARD(buffer.write_length(reg_count * 2));
+				uint8_t *start_addr = get_start_addr(storage.halfs_registers, reg_offset);
+				RES_FORWARD(buffer.write_data(std::span<uint8_t>{start_addr, reg_count * 2u}));
+			}
+			break;
+		case function_code::READ_INPUT_REGISTERS:
+			if constexpr (!HasWriteHalfs<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
+			} else {
+				RES_FORWARD(is_register_covered<decltype(storage.halfs_write_registers)>(reg_offset, reg_count));
+				RES_FORWARD(buffer.write_length(reg_count * 2));
+				uint8_t *start_addr = get_start_addr(storage.halfs_write_registers, reg_offset);
+				RES_FORWARD(buffer.write_data(std::span<uint8_t>{start_addr, reg_count * 2u}));
+			}
+			break;
+		case function_code::WRITE_SINGLE_COIL:
+			// TODO: implement
+			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		case function_code::WRITE_SINGLE_REGISTER:
+			if constexpr (!HasWriteHalfs<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
+			} else {
+				RES_FORWARD(is_register_covered<decltype(storage.halfs_write_registers)>(reg_offset, 1));
+				RES_BOOL_ASSERT(buffer.data, "MISSING_DATA_IN_FRAME");
+				uint8_t *start_addr = get_start_addr(storage.halfs_write_registers, reg_offset);
+				std::copy_n(buffer.data, 2, start_addr);
+			}
+			break;
+		case function_code::WRITE_MULTIPLE_COILS:
+			// TODO: implement
+			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		case function_code::WRITE_MULTIPLE_REGISTERS:
+			if constexpr (!HasWriteHalfs<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
+			} else {
+				RES_FORWARD(is_register_covered<decltype(storage.halfs_write_registers)>(reg_offset, reg_count));
+				RES_BOOL_ASSERT(buffer.data, "MISSING_DATA_IN_FRAME");
+				uint8_t *start_addr = get_start_addr(storage.halfs_write_registers, reg_offset);
+				std::copy_n(buffer.data, reg_count * 2, start_addr);
+			}
+			break;
+		}
+
+		// footer (crc) information
+		switch(lc.transport) {
+		case transport_t::RTU: RES_FORWARD(buffer.write_checksum(checksum::calculate_crc16(buffer.frame_data.span()))); break;
+		case transport_t::TCP: swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), buffer.tcp_header->length); break;
+		case transport_t::ASCII: RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		}
+
+		return {buffer.frame_data.span()};
+	}
+
+	template<typename Mem, typename MemT = MemberType<Layout, Mem>>
+	requires IsValidRegister<Layout, Mem>
+	constexpr MemT read(Mem src) {
 		MemT res{};
-		swap_byte_order<MemT>{}(storage.*src_reg.*src, res);
+		swap_byte_order<MemT>{}(register_ref<Layout, Mem>(storage).*src, res);
 		return res;
 	}
 
-	template<typename Reg, typename Mem, typename MemT = mem_t<mem_t<Layout, Reg>, Mem>>
-	requires IsMemberChain<Layout, Reg, Mem>
-	constexpr void write(const MemT &src, Reg dst_reg, Mem dst) {
-		swap_byte_order<MemT>{}(src, storage.*dst_reg.*dst);
+	template<typename Mem, typename MemT = MemberType<Layout, Mem>>
+	requires IsValidRegister<Layout, Mem>
+	constexpr void write(const MemT &src, Mem dst) {
+		swap_byte_order<MemT>{}(src, register_ref<Layout, Mem>(storage).*dst);
 	}
 
 
@@ -323,8 +464,6 @@ struct modbus_register {
 	// Internal frame fill functions
 	// ---------------------------------------------------------------------------------------
 	// Client
-	#define RES_ERR_ASSERT(cond, msg) if (cond != OK) return {.err = msg}
-	#define RES_FORWARD(stm) if (result r = stm; r != OK) return {.err = r}
 	constexpr result_err _get_frame_read_req(register_t reg_type, uint32_t reg_offset, uint32_t reg_count) {
 		switch (reg_type) {
 			case register_t::BITS:        RES_FORWARD(buffer.write_fc(function_code::READ_COILS)); break;
@@ -337,14 +476,10 @@ struct modbus_register {
 		RES_ERR_ASSERT(buffer.write_data(l_byte(reg_offset)), "WRITE_REG_OFF_ERR");
 		RES_ERR_ASSERT(buffer.write_data(h_byte(reg_count)), "WRITE_REG_COUNT_ERR");
 		RES_ERR_ASSERT(buffer.write_data(l_byte(reg_count)), "WRITE_REG_COUNT_ERR");
-		if (buffer.is_ascii()) {
-			return {.err = "ASCII not implemented yet"};
-		} else {
-			uint16_t crc = checksum::calculate_crc16(buffer.frame_data.span());
-			RES_FORWARD(buffer.write_checksum(crc));
-		}
-		if (buffer.tcp_header) {
-			buffer.tcp_header->length = buffer.frame_data.size() - sizeof(*buffer.tcp_header);
+		switch(buffer.transport) {
+		case transport_t::RTU: RES_FORWARD(buffer.write_checksum(checksum::calculate_crc16(buffer.frame_data.span()))); break;
+		case transport_t::TCP: swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), buffer.tcp_header->length); break;
+		case transport_t::ASCII: RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
 		}
 		lc = get_last_completed();
 		return {buffer.frame_data.span()};
@@ -384,20 +519,17 @@ struct modbus_register {
 
 		if (buffer.is_ascii()) {
 			return {.err = "ASCII not implemented yet"};
-		} else {
+		} else if (buffer.is_rtu()) {
 			uint16_t crc = checksum::calculate_crc16(buffer.frame_data.span());
 			RES_FORWARD(buffer.write_checksum(crc));
 		}
-		if (buffer.tcp_header) {
+		if (buffer.is_tcp()) {
 			swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), 
 				buffer.tcp_header->length);
 		}
 		lc = get_last_completed();
 		return {buffer.frame_data.span()};
 	}
-	// Server
-	constexpr result_err _get_frame_read_res();
-	constexpr result_err _get_frame_write_res();
 
 	constexpr result_err _process(uint8_t b) {
 		result r = buffer.process(b);
@@ -457,7 +589,7 @@ struct modbus_register {
 					return {.err = "LAYOUT_HAS_NO_HALFS"};
 				} else {
 				constexpr int START = decltype(storage.halfs_registers)::OFFSET;
-				constexpr int END = START + sizeof(storage.halfs_registers);
+				constexpr int END = START + sizeof(storage.halfs_registers) / 2;
 				if (reg_offset < START || reg_offset + reg_count > END) {
 					buffer.clear();
 					return {.err = "REG_OUT_OF_BOUNDS"};
@@ -476,7 +608,7 @@ struct modbus_register {
 					return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
 				} else {
 				constexpr int START = decltype(storage.halfs_write_registers)::OFFSET;
-				constexpr int END = START + sizeof(storage.halfs_write_registers);
+				constexpr int END = START + sizeof(storage.halfs_write_registers) / 2;
 				if (reg_offset < START || reg_offset + reg_count > END) {
 					buffer.clear();
 					return {.err = "REG_OUT_OF_BOUNDS"};
@@ -503,16 +635,18 @@ struct modbus_register {
 	}
 
 	last_completed get_last_completed() {
-		uint16_t *reg = reinterpret_cast<uint16_t*>(buffer.frame_data.begin());
 		return last_completed{
+			.transport = buffer.transport,
 			.addr = buffer.addr ? *buffer.addr: uint8_t(0),
 			.fc = buffer.fc ? function_code(*buffer.fc): function_code::NONE,
-			.i1 = reg[1],
-			.i2 = reg[2],
+			.i1 = *reinterpret_cast<uint16_t*>(buffer.fc + 1),
+			.i2 = *reinterpret_cast<uint16_t*>(buffer.fc + 3),
 			.crc = *(reinterpret_cast<uint16_t*>(buffer.frame_data.end()) - 1),
 		};
 	}
 	#undef RES_ERR_ASSERT
+	#undef RES_FORWARD
+	#undef RES_BOOL_ASSERT
 };
 
 }

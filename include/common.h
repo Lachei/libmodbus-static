@@ -39,6 +39,13 @@ constexpr std::string_view INVALID_CRC{"CRC_CHECK_FAILED"};
 constexpr inline uint8_t h_byte(uint16_t h) { return (h >> 8) & 0xff; }
 constexpr inline uint8_t l_byte(uint16_t h) { return h & 0xff; }
 
+enum struct transport_t: uint8_t {
+	NONE = 0,
+	RTU = 1,
+	TCP = 2,
+	ASCII = 3
+};
+
 enum struct register_t: uint8_t {
 	NONE = 0,
 	BITS = 1,
@@ -129,22 +136,21 @@ uint16_t calculate_crc16(std::span<uint8_t> buffer);
 
 template<int N>
 struct static_byte_vector {
-	using T = uint8_t;
-	std::array<T, N> storage{};
+	std::array<uint8_t, N> storage{};
 	int cur_size{};
 	constexpr uint8_t& operator[](int i) { return storage[std::min(i, cur_size)]; }
 	constexpr const uint8_t& operator[](int i) const { return storage[std::min(i, cur_size)]; }
-	constexpr T* begin() { return storage.begin(); }
-	constexpr T* end() { return storage.begin() + cur_size; }
-	constexpr const T* begin() const { return storage.begin(); }
-	constexpr const T* end() const { return storage.begin() + cur_size; }
-	constexpr T* push() { if (cur_size >= N) return {}; return storage.data() + cur_size++; }
-	constexpr bool push(const T& e) { if (cur_size == N) return false; storage[cur_size++] = e; return true; }
-	constexpr bool push(T&& e) { if (cur_size == N) return false; storage[cur_size++] = std::move(e); return true; }
+	constexpr uint8_t* begin() { return storage.begin(); }
+	constexpr uint8_t* end() { return storage.begin() + cur_size; }
+	constexpr const uint8_t* begin() const { return storage.begin(); }
+	constexpr const uint8_t* end() const { return storage.begin() + cur_size; }
+	constexpr uint8_t* push() { if (cur_size >= N) return {}; return storage.data() + cur_size++; }
+	constexpr bool push(uint8_t e) { if (cur_size == N) return false; storage[cur_size++] = e; return true; }
 	constexpr void clear() { cur_size = 0; }
 	constexpr bool empty() const { return cur_size == 0; }
 	constexpr int size() const { return cur_size; }
 	constexpr std::span<uint8_t> span() { return {begin(), end()}; }
+	constexpr std::span<const uint8_t> span() const { return {begin(), end()}; }
 };
 
 template<int MAX_SIZE = 256>
@@ -167,6 +173,7 @@ struct modbus_frame {
 	};
 
 	state cur_state{state::WRITE_ADDR_START_MBAP};
+	transport_t transport{transport_t::NONE};
 	static_byte_vector<MAX_SIZE> frame_data{};
 	mbap_header *tcp_header{};
 	uint8_t *addr{};
@@ -175,8 +182,10 @@ struct modbus_frame {
 	uint8_t *ec{};
 	uint8_t *data{};
 	type t{.REQUEST = true};
+	constexpr bool empty() {return cur_state == state::WRITE_ADDR_START_MBAP || frame_data.empty() || !fc;}
 	constexpr void clear() {
 		cur_state = state::WRITE_ADDR_START_MBAP;
+		transport = transport_t::NONE;
 		frame_data.clear();
 		tcp_header = {};
 		addr = {};
@@ -205,6 +214,7 @@ struct modbus_frame {
 	constexpr result write_ascii_start() {
 		RESULT_ASSERT(cur_state == state::WRITE_ADDR_START_MBAP, "STATE_NOT_WRITE_START");
 		RESULT_ASSERT(frame_data.push(':'), "WRITE_ASCII_START_FAILED");
+		transport = transport_t::ASCII;
 		cur_state = state::WRITE_ADDR;
 		return OK;
 	}
@@ -215,6 +225,9 @@ struct modbus_frame {
 		RESULT_ASSERT(frame_data.push(l_byte(header.transaction_id)), "WRITE_TRANS_ID_FAILED");
 		RESULT_ASSERT(frame_data.push(h_byte(header.protocol_id)), "WRITE_PROTOCOL_ID_FAILED");
 		RESULT_ASSERT(frame_data.push(l_byte(header.protocol_id)), "WRITE_PROTOCOL_ID_FAILED");
+		RESULT_ASSERT(frame_data.push(0), "WRITE_TCP_LENGTH_FAILED");
+		RESULT_ASSERT(frame_data.push(0), "WRITE_TCP_LENGTH_FAILED");
+		transport = transport_t::TCP;
 		cur_state = state::WRITE_ADDR;
 		return OK;
 	}
@@ -223,10 +236,12 @@ struct modbus_frame {
 				"STATE_NOT_WRITE_ADDR");
 		this->addr = frame_data.end();
 		RESULT_ASSERT(frame_data.push(addr), "WRITE_ADDR_FAILED");
+		if (transport == transport_t::NONE)
+			transport = transport_t::RTU;
 		cur_state = state::WRITE_FC;
 		return OK;
 	}
-	constexpr result write_fc(function_code fc, type t = type{.REQUEST = true}) {
+	constexpr result write_fc(function_code fc) {
 		RESULT_ASSERT(cur_state == state::WRITE_FC, "STATE_NOT_WRITE_FC");
 		RESULT_ASSERT(fc >= function_code::NONE && fc <= function_code::WRITE_MULTIPLE_REGISTERS,
 				"INVALID_FUNCTION_CODE");
@@ -303,7 +318,7 @@ struct modbus_frame {
 		case modbus_frame<MAX_SIZE>::state::WRITE_ADDR:
 			return write_addr(b);
 		case modbus_frame<MAX_SIZE>::state::WRITE_FC:
-			return write_fc(function_code(b), t);
+			return write_fc(function_code(b));
 		case modbus_frame<MAX_SIZE>::state::WRITE_LENGTH:
 			return write_length(b);
 		case modbus_frame<MAX_SIZE>::state::WRITE_DATA:

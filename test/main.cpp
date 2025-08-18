@@ -92,7 +92,8 @@ struct test_layout {
 	} halfs_write_registers;
 };
 #pragma pack(pop)
-using el = example_layout;
+using e = example_layout;
+using t = test_layout;
 
 int main() {
 	std::cout << "---------------------------------------------------------------------------------------\n";
@@ -127,18 +128,20 @@ int main() {
 	std::cout << "Read/write tests\n";
 	std::cout << "---------------------------------------------------------------------------------------\n";
 	assert(modbus.addr == 20);
+
+	static_assert(IsHalfsRegister<example_layout, decltype(&e::halfs_layout::string_field)>, "This is a halfs register");
 	
-	std::string_view sv = to_string_view(modbus.read(MEMBER_CHAIN(example_layout, halfs, string_field)));
+	std::string_view sv = to_string_view(modbus.read(&e::halfs_layout::string_field));
 	assert(sv == "Default");
-	modbus.write(mod_string<32>{"Another"}, MEMBER_CHAIN(example_layout, halfs, string_field));
-	sv = to_string_view(modbus.read(MEMBER_CHAIN(example_layout, halfs, string_field)));
+	modbus.write(mod_string<32>{"Another"}, &e::halfs_layout::string_field);
+	sv = to_string_view(modbus.read(&e::halfs_layout::string_field));
 	assert(sv == "Another");
-	assert(modbus.read(MEMBER_CHAIN(example_layout, halfs, a)) == 0);
-	modbus.write(20.0f, MEMBER_CHAIN(el, halfs, a));
-	assert(modbus.read(MEMBER_CHAIN(example_layout, halfs, a)) == 20.0f);
+	assert(modbus.read(&e::halfs_layout::a) == 0);
+	modbus.write(20.0f, &e::halfs_layout::a);
+	assert(modbus.read(&e::halfs_layout::a) == 20.0f);
 	assert(modbus.storage.halfs_registers.a != 20.0f);
-	assert(modbus.read(MEMBER_CHAIN(el, halfs_write, others)) == 0);
-	modbus.write(uint16_t(0x00ff), MEMBER_CHAIN(el, halfs_write, others));
+	assert(modbus.read(&e::halfs_write_layout::others) == 0);
+	modbus.write(uint16_t(0x00ff), &e::halfs_write_layout::others);
 	assert(modbus.storage.halfs_write_registers.others == 0xff00);
 
 	// bits structs should be written directly
@@ -154,7 +157,7 @@ int main() {
 
 	std::println("Test read register from read registers");
 	assert(client_test.start_rtu_frame(1) == OK);
-	auto [res, err] = client_test.get_frame_read(MEMBER_CHAIN_RANGE(test_layout, halfs, r1, r2));
+	auto [res, err] = client_test.get_frame_read(&t::halfs_layout::r1, &t::halfs_layout::r2);
 	assert(err == OK);
 	std::vector<uint8_t> valid_read_holding = {0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xc4, 0x0b};
 	std::vector<uint8_t> valid_read_response = {0x01, 0x03, 0x04, 0x00, 0x06, 0x00, 0x05, 0xda, 0x31};
@@ -179,13 +182,13 @@ int main() {
 	for (uint8_t b: (valid_read_response | std::ranges::views::take(valid_read_response.size() - 1)))
 		assert(client_test.process_rtu(b).err == IN_PROGRESS);
 	assert(client_test.process_rtu(valid_read_response.back()).err == OK);
-	assert(client_test.read(MEMBER_CHAIN(test_layout, halfs, r1)) == 6);
-	assert(client_test.read(MEMBER_CHAIN(test_layout, halfs, r2)) == 5);
+	assert(client_test.read(&t::halfs_layout::r1) == 6);
+	assert(client_test.read(&t::halfs_layout::r2) == 5);
 
 	std::println("\nTest read single register from write registers");
-	client_test.write(uint16_t(44), MEMBER_CHAIN(test_layout, halfs_write, r1));
+	client_test.write(uint16_t(44), &t::halfs_write_layout::r1);
 	assert(client_test.start_rtu_frame(1) == OK);
-	r_tie(res, err) = client_test.get_frame_read(MEMBER_CHAIN(test_layout, halfs_write, r1));
+	r_tie(res, err) = client_test.get_frame_read(&t::halfs_write_layout::r1);
 	assert(err == OK);
 	std::vector<uint8_t> valid_read_input = {0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 49, 202};
 	std::vector<uint8_t> valid_read_response_input = {0x01, 0x04, 0x02, 0x00, 0x00, 0xb9, 0x30};
@@ -197,16 +200,16 @@ int main() {
 	for (uint8_t b: (valid_read_response_input | std::ranges::views::take(valid_read_response_input.size() - 1)))
 		assert(client_test.process_rtu(b).err == IN_PROGRESS);
 	assert(client_test.process_rtu(valid_read_response_input.back()).err == OK);
-	assert(client_test.read(MEMBER_CHAIN(test_layout, halfs_write, r1)) == 0);
+	assert(client_test.read(&t::halfs_write_layout::r1) == 0);
 
 	std::println("\nTest write single register");
 	// invalid target register
 	assert(client_test.start_rtu_frame(2) == OK);
-	r_tie(res, err) = client_test.get_frame_write(MEMBER_CHAIN(test_layout, halfs, r1));
+	r_tie(res, err) = client_test.get_frame_write(&t::halfs_layout::r1);
 	assert(err == "HALFS_NOT_ALLOWED");
-	client_test.write(uint16_t(3), MEMBER_CHAIN(test_layout, halfs_write, r1));
+	client_test.write(uint16_t(3), &t::halfs_write_layout::r1);
 	assert(client_test.start_rtu_frame(17) == OK);
-	r_tie{res, err} = client_test.get_frame_write(MEMBER_CHAIN(test_layout, halfs_write, r1));
+	r_tie{res, err} = client_test.get_frame_write(&t::halfs_write_layout::r1);
 	assert(err == OK);
 	std::vector<uint8_t> solution1 = {0x11, 0x06, 0x00, 0x00, 0x00, 0x03, 203, 91};
 	std::println("should be: {:}", solution1);
@@ -249,10 +252,12 @@ int main() {
 
 	std::println("\nRead halfs");
 	modbus_register<test_layout, 1>& test_server{modbus_register<test_layout, 1>::Default()};
+	test_server.write(uint16_t(5), &t::halfs_layout::r3);
+	test_server.write(uint16_t(6), &t::halfs_layout::r4);
 
 	std::println("Bad address");
 	client_test.start_rtu_frame(31);
-	r_tie{res, err} = client_test.get_frame_read(MEMBER_CHAIN_RANGE(test_layout, halfs, r3, r4));
+	r_tie{res, err} = client_test.get_frame_read(&t::halfs_layout::r3, &t::halfs_layout::r4);
 	assert(err == OK);
 	std::println("Read halfs frame: {}", res);
 	for (uint8_t b: res | std::ranges::views::take(res.size() - 1))
@@ -261,13 +266,61 @@ int main() {
 
 	std::println("Valid read halfs");
 	client_test.start_rtu_frame(1);
-	r_tie{res, err} = client_test.get_frame_read(MEMBER_CHAIN_RANGE(test_layout, halfs, r3, r4));
+	r_tie{res, err} = client_test.get_frame_read(&t::halfs_layout::r3, &t::halfs_layout::r4);
 	std::println("Read halfs frame: {}", res);
 	assert(err == OK);
 	for (uint8_t b: res | std::ranges::views::take(res.size() - 1))
 		assert(test_server.process_rtu(b).err == IN_PROGRESS);
 	assert(test_server.process_rtu(res.back()).err == OK);
-	
+	r_tie{res, err} = test_server.get_frame_response();
+	std::println("Read halfs frame responnse: {}", res);
+	std::vector<uint8_t> halfs_readout{1, 3, 4, 0, 5, 0, 6, 106, 48};
+	assert(err == OK);
+	assert(res == halfs_readout);
+
+	std::println("Valid read write_halfs");
+	test_server.write(uint16_t(6), &t::halfs_write_layout::r3);
+	test_server.write(uint16_t(2), &t::halfs_write_layout::r4);
+	client_test.start_rtu_frame(1);
+	r_tie{res, err} = client_test.get_frame_read(&t::halfs_write_layout::r1, &t::halfs_write_layout::r4);
+	std::println("Read halfs frame: {}", res);
+	assert(err == OK);
+	test_server.switch_to_request();
+	for (uint8_t b: res | std::ranges::views::take(res.size() - 1))
+		assert(test_server.process_rtu(b).err == IN_PROGRESS);
+	assert(test_server.process_rtu(res.back()).err == OK);
+	r_tie{res, err} = test_server.get_frame_response();
+	std::vector<uint8_t> halfs_write_readout{1, 4, 8, 0, 0, 0, 0, 0, 6, 0, 2, 69, 205};
+	std::println("Read halfs frame responnse: {}", res);
+	assert(err == OK);
+	assert(res == halfs_write_readout);
+
+	std::println("Done.\n\n");
+
+	std::cout << "---------------------------------------------------------------------------------------\n";
+	std::cout << "TCP test\n";
+	std::cout << "---------------------------------------------------------------------------------------\n";
+
+	assert(client_test.start_tcp_frame(10, 1) == OK);
+	r_tie{res, err} = client_test.get_frame_read(&t::halfs_layout::r4);
+	std::vector<uint8_t> tcp_valid_read{0, 10, 0, 0, 0, 6, 1, 3, 0, 3, 0, 1};
+	std::println("tcp request frame: {}, {}", err, res);
+	assert(err == OK);
+	assert(res == tcp_valid_read);
+
+	test_server.write(uint16_t(0x1805), &t::halfs_layout::r4);
+	test_server.switch_to_request();
+	for (uint8_t b: res | std::ranges::views::take(res.size() - 1))
+		assert(test_server.process_tcp(b).err == IN_PROGRESS);
+	assert(test_server.process_tcp(res.back()).err == OK);
+	r_tie{res, err} = test_server.get_frame_response();
+	std::vector<uint8_t> tcp_valid_response{0, 10, 0, 0, 0, 5, 1, 3, 2, 24, 5};
+	std::println("tcp response frame: {}, {}", err, res);
+	assert(err == OK);
+	assert(res == tcp_valid_response);
+
 	std::println("Done.\n");
+
+	return 0;
 }
 

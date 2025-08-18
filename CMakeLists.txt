@@ -15,3 +15,8 @@ option(BUILD_TESTS "Build unit tests" ON)
 if (${BUILD_TESTS})
 	add_subdirectory(test)
 endif ()
+
+option(BUILD_EXAMPLES "Build examples" ON)
+if (${BUILD_EXAMPLES})
+	add_subdirectory(examples)
+endif ()
