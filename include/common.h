@@ -4,6 +4,7 @@
 #include <array>
 #include <string_view>
 #include <inttypes.h>
+#include <ranges>
 
 //TODO: remove
 #include <iostream>
@@ -278,14 +279,23 @@ struct modbus_frame {
 		return OK;
 	}
 	constexpr result write_data(std::span<uint8_t> data) {
-		for (uint8_t b: data)
-			RESULT_ASSERT(write_data(b) == OK, "WRITE_DATA_FAILED");
+		if (data.data()) {
+			for (uint8_t b: data)
+				RESULT_ASSERT(write_data(b) == OK, "WRITE_DATA_FAILED");
+		}
+		else  {
+			for (size_t i : std::ranges::iota_view{size_t(0), data.size()})
+				RESULT_ASSERT(write_data(0) == OK, "WRITE_DATA_NULL_FAILED");
+		}
 		return OK;
 	}
 	constexpr result write_ec(exception_code ec) {
 		RESULT_ASSERT(cur_state == state::WRITE_DATA_EC, "STATE_NOT_WRITE_EC");
 		this->ec = frame_data.end();
-		RESULT_ASSERT(frame_data.push(ec), "WRITE_EC_FAILED");
+		RESULT_ASSERT(frame_data.push(uint8_t(ec)), "WRITE_EC_FAILED");
+		if (tcp_header)
+			cur_state = state::FINAL;
+		else
 		cur_state = state::WRITE_CRC_0;
 		return OK;
 	}

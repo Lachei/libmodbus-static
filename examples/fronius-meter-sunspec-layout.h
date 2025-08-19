@@ -9,7 +9,7 @@ namespace fronius_meter {
 */
 #pragma pack(push, 1)
 struct halfs_layout {
-	constexpr static int OFFSET = 40000;
+	constexpr static int OFFSET = 40001;
 	std::array<char, 4> sid{'S','u','n','S'};
 	uint16_t id = 1;
 	uint16_t l_header = 65;

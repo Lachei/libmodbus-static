@@ -77,6 +77,7 @@ int main(int argc, char **argv) {
 		return EXIT_FAILURE;
 
 	auto modbus_server = modbus_register<fronius_meter::layout, 1>::Default();
+	std::println("Created modbus server on port {} with addr {}", port, modbus_server.addr);
 
 	while (RunningSingleton()) {
 		// get buffer data
@@ -107,9 +108,14 @@ int main(int argc, char **argv) {
 			auto [res, err] = modbus_server.get_frame_response();
 			if (err != OK) {
 				std::println("Modbus generating response failed with {}", err);
-				continue;
+				r_tie{res, err} = modbus_server.get_frame_error_response(err);
+				if (err != OK) {
+					std::println("Modbus generating error response failed with {}", err);
+					continue;
+				}
 			}
-			send(tcp_socket, res.data(), res.size(), 0);
+			std::println("Sending response: {}", res);
+			send(c, res.data(), res.size(), 0);
 			modbus_server.switch_to_request();
 		}
 		// close connection for next request

@@ -11,6 +11,12 @@
 #include <iostream>
 
 namespace libmodbus_static {
+
+constexpr std::string_view IN_PROGRESS{"IN_PROGRESS"};
+constexpr std::string_view INVALID_RESPONSE{"RESPONSE_FROM_SERVER_INVALID"};
+constexpr std::string_view WRONG_ADDR{"WRONG_ADDR"};
+constexpr std::string_view REGISTER_NOT_FULLY_COVERED{"REGISTER_NOT_FULLY_COVERED"};
+
 template<int N>
 using mod_string = std::array<char, N>;
 template<typename T>
@@ -53,11 +59,17 @@ struct swap_byte_order<T> {
 	}
 };
 template<typename T>
+constexpr T to_hb_first(T e) {
+	T res{};
+	swap_byte_order<T>{}(e, res);
+	return res;
+}
+template<typename T>
 constexpr static result is_register_covered(uint32_t reg_offset, uint32_t reg_count) {
 	constexpr int START = T::OFFSET;
 	constexpr int END = START + sizeof(T) / 2;
 	if (reg_offset < START || END < reg_offset + reg_count)
-		return "REGISTER_NOT_FULLY_COVERED";
+		return REGISTER_NOT_FULLY_COVERED;
 	return OK;
 }
 template<typename T>
@@ -66,9 +78,6 @@ constexpr static uint8_t* get_start_addr(T &r, uint32_t reg_offset) {
 	return reinterpret_cast<uint8_t*>(&r) + (reg_offset - START) * 2;
 }
 
-constexpr std::string_view IN_PROGRESS{"IN_PROGRESS"};
-constexpr std::string_view INVALID_RESPONSE{"RESPONSE_FROM_SERVER_INVALID"};
-constexpr std::string_view WRONG_ADDR{"WRONG_ADDR"};
 struct result_err {
 	std::span<uint8_t> res{};
 	std::string_view err{OK};
@@ -186,9 +195,6 @@ constexpr R& get_register_ref(L &l) { return l.bits_registers; }
 template<typename L, typename R> requires requires (L l, R r) {l.bits_write_registers = r;}
 constexpr R& get_register_ref(L &l) { return l.bits_write_registers; }
 
-#define MEMBER_CHAIN(l, r, m) (&l::r##_registers), (&l::r##_layout::m)
-#define MEMBER_CHAIN_RANGE(l, r, m1, m2) (&l::r##_registers), (&l::r##_layout::m1), (&l::r##_layout::m2)
-
 template<typename Layout, uint8_t Address = 0, int MAX_SIZE = 256>
 struct modbus_register {
 	static modbus_register& Default() { static modbus_register r{}; return r; }
@@ -198,6 +204,7 @@ struct modbus_register {
 	modbus_frame<MAX_SIZE> buffer{};
 	struct last_completed{
 		transport_t transport{};
+		uint16_t tcp_tid{};
 		uint8_t addr{};
 		function_code fc{};
 		uint16_t i1{};
@@ -365,12 +372,10 @@ struct modbus_register {
 		// header information
 		uint16_t reg_offset = (l_byte(lc.i1) << 8) | h_byte(lc.i1);
 		uint16_t reg_count = (l_byte(lc.i2) << 8) | h_byte(lc.i2);
-		uint16_t tcp_tid = buffer.tcp_header ? buffer.tcp_header->transaction_id: 0;
-		swap_byte_order<uint16_t>{}(tcp_tid, tcp_tid);
 		switch_to_response();
 		switch(lc.transport) {
 		case transport_t::ASCII: RES_FORWARD(buffer.write_ascii_start()); break;
-		case transport_t::TCP: RES_FORWARD(buffer.write_mbap({tcp_tid})); break;
+		case transport_t::TCP: RES_FORWARD(buffer.write_mbap({lc.tcp_tid})); break;
 		}
 		RES_FORWARD(buffer.write_addr(lc.addr));
 		RES_FORWARD(buffer.write_fc(lc.fc));
@@ -433,6 +438,30 @@ struct modbus_register {
 				std::copy_n(buffer.data, reg_count * 2, start_addr);
 			}
 			break;
+		}
+
+		// footer (crc) information
+		switch(lc.transport) {
+		case transport_t::RTU: RES_FORWARD(buffer.write_checksum(checksum::calculate_crc16(buffer.frame_data.span()))); break;
+		case transport_t::TCP: swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), buffer.tcp_header->length); break;
+		case transport_t::ASCII: RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		}
+
+		return {buffer.frame_data.span()};
+	}
+	constexpr result_err get_frame_error_response(result err) {
+		switch_to_response();
+		buffer.t.EXCEPTION = true;
+		switch(lc.transport) {
+		case transport_t::ASCII: RES_FORWARD(buffer.write_ascii_start()); break;
+		case transport_t::TCP: RES_FORWARD(buffer.write_mbap({lc.tcp_tid})); break;
+		}
+		RES_FORWARD(buffer.write_addr(lc.addr));
+		RES_FORWARD(buffer.write_fc(lc.fc));
+		if (err == REGISTER_NOT_FULLY_COVERED) {
+			RES_FORWARD(buffer.write_ec(exception_code::ILLEGAL_DATA_ADDRESS));
+		} else {
+			RES_FORWARD(buffer.write_ec(exception_code::SLAVE_DEVICE_FAILURE));
 		}
 
 		// footer (crc) information
@@ -637,6 +666,7 @@ struct modbus_register {
 	last_completed get_last_completed() {
 		return last_completed{
 			.transport = buffer.transport,
+			.tcp_tid = buffer.tcp_header ? to_hb_first(buffer.tcp_header->transaction_id): uint16_t(0),
 			.addr = buffer.addr ? *buffer.addr: uint8_t(0),
 			.fc = buffer.fc ? function_code(*buffer.fc): function_code::NONE,
 			.i1 = *reinterpret_cast<uint16_t*>(buffer.fc + 1),
