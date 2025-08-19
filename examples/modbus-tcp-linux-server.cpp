@@ -14,7 +14,7 @@ void print_usage() {
 	std::println(R"(
 Simple modbus tcp server demonstrating the usage of the libmodbus-static with linux tcp sockets
 
-modbus-tcp-linux-server [--port,-p PORT=502]
+modbus-tcp-linux-server [--port,-p PORT=502] [--address,-t ADDRESS=1] [--help]
 )");
 }
 
@@ -59,25 +59,34 @@ int create_tcp_socket(int port) {
 
 int main(int argc, char **argv) {
 	signal(SIGINT, sig_handler);
-	if (argc > 3) {
-		std::println("Error too many arguments: {}", argc);
-		print_usage();
-		return EXIT_FAILURE;
-	}
 
 	int port = 502;
+	int addr = 1;
 	for (int i: std::ranges::iota_view{0, argc}) {
 		if ((argv[i] == std::string_view("--port") ||
       			argv[i] == std::string_view("-p")) && i + 1 < argc)
 			port = std::strtol(argv[i + 1], nullptr, 0);
+		if ((argv[i] == std::string_view("--address") ||
+      			argv[i] == std::string_view("-a")) && i + 1 < argc)
+			addr = std::strtol(argv[i + 1], nullptr, 0);
+		if ((argv[i] == std::string_view("--help") ||
+      			argv[i] == std::string_view("-h")) && i + 1 < argc) {
+			print_usage();
+			return EXIT_SUCCESS;
+		}
 	}
 	
 	int tcp_socket = create_tcp_socket(port);
 	if (tcp_socket == -1)
 		return EXIT_FAILURE;
 
-	auto modbus_server = modbus_register<fronius_meter::layout, 1>::Default();
+	auto modbus_server = modbus_register<fronius_meter::layout>::Default(addr);
 	std::println("Created modbus server on port {} with addr {}", port, modbus_server.addr);
+
+	modbus_server.write(1.0f, &fronius_meter::halfs_layout::pf);
+	modbus_server.write(1.0f, &fronius_meter::halfs_layout::pfpha);
+	modbus_server.write(1.0f, &fronius_meter::halfs_layout::pfphb);
+	modbus_server.write(1.0f, &fronius_meter::halfs_layout::pfphc);
 
 	while (RunningSingleton()) {
 		// get buffer data
@@ -115,10 +124,14 @@ int main(int argc, char **argv) {
 				}
 			}
 			std::println("Sending response: {}", res);
-			send(c, res.data(), res.size(), 0);
+			ssize_t sent_bytes = write(c, res.data(), res.size());
+			close(c);
+			if (sent_bytes != res.size())
+				std::println("Only {} bytes of {} bytes written", sent_bytes, res.size());
 			modbus_server.switch_to_request();
 		}
 		// close connection for next request
+		modbus_server.switch_to_request();
 		close(c);
 	}
 

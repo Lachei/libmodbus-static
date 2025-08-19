@@ -195,11 +195,12 @@ constexpr R& get_register_ref(L &l) { return l.bits_registers; }
 template<typename L, typename R> requires requires (L l, R r) {l.bits_write_registers = r;}
 constexpr R& get_register_ref(L &l) { return l.bits_write_registers; }
 
-template<typename Layout, uint8_t Address = 0, int MAX_SIZE = 256>
+template<typename Layout, int MAX_SIZE = 256>
 struct modbus_register {
-	static modbus_register& Default() { static modbus_register r{}; return r; }
+	template<int slot = 0>
+	static modbus_register& Default(uint8_t address) { static modbus_register r{.addr = address}; return r; }
 
-	constexpr static uint8_t addr = Address;
+	const uint8_t addr{};
 	Layout storage{}; // do not access directly, contains data already byte swapped, read and write with read() and write()
 	modbus_frame<MAX_SIZE> buffer{};
 	struct last_completed{
@@ -572,7 +573,7 @@ struct modbus_register {
 		uint16_t reg_count = (l_byte(lc.i2) << 8) | h_byte(lc.i2);
 		last_completed response_lc = get_last_completed();
 		// modbus client
-		if constexpr (addr == 0) { 
+		if (addr == 0) { 
 			// validation checks
 			bool valid = true;
 			bool is_bit{};

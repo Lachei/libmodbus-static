@@ -120,7 +120,7 @@ int main() {
 	static_assert(sizeof(example_layout::halfs_write_registers) == 10);
 	static_assert(sizeof(example_layout) == 57);
 
-	modbus_register<example_layout, 20>& modbus{modbus_register<example_layout, 20>::Default()};
+	modbus_register<example_layout>& modbus{modbus_register<example_layout>::Default(20)};
 	
 	std::cout << "Done. \n\n";
 
@@ -153,7 +153,7 @@ int main() {
 	std::cout << "Client tests\n";
 	std::cout << "---------------------------------------------------------------------------------------\n";
 
-	modbus_register<test_layout, 0>& client_test{modbus_register<test_layout, 0>::Default()};
+	modbus_register<test_layout>& client_test{modbus_register<test_layout>::Default(0)};
 
 	std::println("Test read register from read registers");
 	assert(client_test.start_rtu_frame(1) == OK);
@@ -251,7 +251,7 @@ int main() {
 	std::cout << "---------------------------------------------------------------------------------------\n";
 
 	std::println("\nRead halfs");
-	modbus_register<test_layout, 1>& test_server{modbus_register<test_layout, 1>::Default()};
+	modbus_register<test_layout>& test_server{modbus_register<test_layout>::Default<1>(1)};
 	test_server.write(uint16_t(5), &t::halfs_layout::r3);
 	test_server.write(uint16_t(6), &t::halfs_layout::r4);
 
