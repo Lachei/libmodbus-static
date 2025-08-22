@@ -20,17 +20,17 @@ constexpr std::string_view REGISTER_NOT_FULLY_COVERED{"REGISTER_NOT_FULLY_COVERE
 template<int N>
 using mod_string = std::array<char, N>;
 template<typename T>
-std::string_view to_string_view(const T &s) {
+constexpr std::string_view to_string_view(const T &s) {
 	std::string_view r{s.begin(), s.end()};
 	return r.substr(0, r.find_first_of('\0'));
 }
 
 template <typename T>
-std::span<uint8_t> to_byte_span(T& t) {
+constexpr std::span<uint8_t> to_byte_span(T& t) {
 	return std::span<uint8_t>{ reinterpret_cast<uint8_t*>(&t), sizeof(t) };
 }
 
-uint32_t popcount(std::span<uint8_t> bytes) {
+constexpr uint32_t popcount(std::span<uint8_t> bytes) {
 	uint32_t bitcount{};
 	for (uint8_t b: bytes)
 		bitcount += std::popcount(b);
@@ -241,7 +241,7 @@ struct modbus_register {
 	}
 	constexpr result_err process_tcp(uint8_t b) {
 		if (buffer.cur_state == modbus_frame<MAX_SIZE>::state::WRITE_ADDR_START_MBAP) {
-			if (buffer.frame_data.size() > sizeof(*buffer.tcp_header)) {
+			if (buffer.frame_data.size() > int(sizeof(*buffer.tcp_header))) {
 				buffer.clear();
 				return {.err = "FATAL_TOO_LARGE_SIZE_FOR_TCP_HEADER"};
 			}
@@ -263,7 +263,7 @@ struct modbus_register {
 			buffer.clear();
 			return {.err = "FATAL_MISSING_TCP_HEADER_IN_FRAME"};
 		}
-		if (buffer.frame_data.size() > buffer.tcp_header->length + sizeof(*buffer.tcp_header)) {
+		if (buffer.frame_data.size() > int(buffer.tcp_header->length + sizeof(*buffer.tcp_header))) {
 			buffer.clear();
 			return {.err = "FATAL_TCP_FRAME_LENGTH_FULL"};
 		}
@@ -377,6 +377,7 @@ struct modbus_register {
 		switch(lc.transport) {
 		case transport_t::ASCII: RES_FORWARD(buffer.write_ascii_start()); break;
 		case transport_t::TCP: RES_FORWARD(buffer.write_mbap({lc.tcp_tid})); break;
+		default: break;
 		}
 		RES_FORWARD(buffer.write_addr(lc.addr));
 		RES_FORWARD(buffer.write_fc(lc.fc));
@@ -439,6 +440,7 @@ struct modbus_register {
 				std::copy_n(buffer.data, reg_count * 2, start_addr);
 			}
 			break;
+		default: break;
 		}
 
 		// footer (crc) information
@@ -446,6 +448,7 @@ struct modbus_register {
 		case transport_t::RTU: RES_FORWARD(buffer.write_checksum(checksum::calculate_crc16(buffer.frame_data.span()))); break;
 		case transport_t::TCP: swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), buffer.tcp_header->length); break;
 		case transport_t::ASCII: RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		default: break;
 		}
 
 		return {buffer.frame_data.span()};
@@ -456,6 +459,7 @@ struct modbus_register {
 		switch(lc.transport) {
 		case transport_t::ASCII: RES_FORWARD(buffer.write_ascii_start()); break;
 		case transport_t::TCP: RES_FORWARD(buffer.write_mbap({lc.tcp_tid})); break;
+		default: break;
 		}
 		RES_FORWARD(buffer.write_addr(lc.addr));
 		RES_FORWARD(buffer.write_fc(lc.fc));
@@ -470,6 +474,7 @@ struct modbus_register {
 		case transport_t::RTU: RES_FORWARD(buffer.write_checksum(checksum::calculate_crc16(buffer.frame_data.span()))); break;
 		case transport_t::TCP: swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), buffer.tcp_header->length); break;
 		case transport_t::ASCII: RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		default: break;
 		}
 
 		return {buffer.frame_data.span()};
@@ -510,6 +515,7 @@ struct modbus_register {
 		case transport_t::RTU: RES_FORWARD(buffer.write_checksum(checksum::calculate_crc16(buffer.frame_data.span()))); break;
 		case transport_t::TCP: swap_byte_order<uint16_t>{}(buffer.frame_data.size() - sizeof(*buffer.tcp_header), buffer.tcp_header->length); break;
 		case transport_t::ASCII: RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+		default: break;
 		}
 		lc = get_last_completed();
 		return {buffer.frame_data.span()};
@@ -589,6 +595,8 @@ struct modbus_register {
 				case function_code::READ_INPUT_REGISTERS:
 					valid = lc.addr == response_lc.addr && lc.fc == response_lc.fc &&
 						is_bit ? (reg_count + 7) / 8 == l_byte(response_lc.i1): reg_count * 2 == l_byte(response_lc.i1);
+					break;
+				default: break;
 			}
 			if (!valid) {
 				buffer.clear();
@@ -651,6 +659,7 @@ struct modbus_register {
 					reinterpret_cast<uint8_t*>(&storage.halfs_write_registers) + (reg_offset - START) * 2);
 				}
 				break;
+			default: break;
 			}
 		} else {
 			// validation checks

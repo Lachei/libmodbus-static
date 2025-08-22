@@ -125,7 +125,6 @@ int main(int argc, char **argv) {
 			}
 			std::println("Sending response: {}", res);
 			ssize_t sent_bytes = write(c, res.data(), res.size());
-			close(c);
 			if (sent_bytes != res.size())
 				std::println("Only {} bytes of {} bytes written", sent_bytes, res.size());
 			modbus_server.switch_to_request();

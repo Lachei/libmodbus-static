@@ -11,12 +11,12 @@ target_include_directories(${PROJECT_NAME} PUBLIC include)
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 20)
 
-option(BUILD_TESTS "Build unit tests" ON)
+option(BUILD_TESTS "Build unit tests" OFF)
 if (${BUILD_TESTS})
 	add_subdirectory(test)
 endif ()
 
-option(BUILD_EXAMPLES "Build examples" ON)
+option(BUILD_EXAMPLES "Build examples" OFF)
 if (${BUILD_EXAMPLES})
 	add_subdirectory(examples)
 endif ()

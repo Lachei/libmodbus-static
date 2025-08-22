@@ -284,7 +284,7 @@ struct modbus_frame {
 				RESULT_ASSERT(write_data(b) == OK, "WRITE_DATA_FAILED");
 		}
 		else  {
-			for (size_t i : std::ranges::iota_view{size_t(0), data.size()})
+			for ([[maybe_unused]] size_t i : std::ranges::iota_view{size_t(0), data.size()})
 				RESULT_ASSERT(write_data(0) == OK, "WRITE_DATA_NULL_FAILED");
 		}
 		return OK;
