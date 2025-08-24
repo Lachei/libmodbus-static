@@ -17,6 +17,36 @@ bool operator==(std::span<uint8_t> a, std::span<uint8_t> b) {
 }
 
 struct bitset_test {
+	constexpr static int OFFSET{20};
+	bool a: 1{};
+	bool b: 1{};
+	bool c: 1{};
+	bool d: 1{};
+	bool e: 1{};
+	bool f: 1{};
+	bool g: 1{};
+	bool h: 1{};
+	bool i: 1{};
+	bool j: 1{};
+	bool k: 1{};
+	bool l: 1{};
+	bool m: 1{};
+	bool n: 1{};
+	bool o: 1{};
+	bool p: 1{};
+	bool q: 1{};
+	bool r: 1{};
+	bool s: 1{};
+	bool t: 1{};
+	bool u: 1{};
+	bool v: 1{};
+	bool w: 1{};
+	bool x: 1{};
+	bool y: 1{};
+	bool z: 1{};
+};
+struct bitset_test_2 {
+	constexpr static int OFFSET{10};
 	bool a: 1{};
 	bool b: 1{};
 	bool c: 1{};
@@ -76,6 +106,8 @@ struct example_layout {
 	} halfs_write_registers;
 };
 struct test_layout {
+	bitset_test bits_registers{};
+	bitset_test_2 bits_write_registers{};
 	struct halfs_layout {
 		constexpr static int OFFSET{0};
 		uint16_t r1{};
@@ -155,9 +187,45 @@ int main() {
 
 	modbus_register<test_layout>& client_test{modbus_register<test_layout>::Default(0)};
 
+	std::println("Test read bits from bits registers");
+	assert(client_test.start_rtu_frame(1) == OK);
+	auto [res, err] = client_test.get_frame_read(bitset_test{.c = true, .g = true});
+	assert(err == OK);
+	std::println("Read bits frame: {}", res);
+	std::vector<uint8_t> valid_bits_read_ref{1, 1, 0, 22, 0, 5, 29, 205};
+	assert(res == valid_bits_read_ref);
+	
+	std::println("Test read bits from bits write registers");
+	assert(client_test.start_rtu_frame(1) == OK);
+	r_tie(res, err) = client_test.get_frame_read(bitset_test_2{.x = true});
+	assert(err == OK);
+	std::println("Read bits write frame: {}", res);
+	std::vector<uint8_t> valid_bits_write_read_ref{1, 2, 0, 33, 0, 1, 233, 192};
+	assert(res == valid_bits_write_read_ref);
+
+	std::println("Test write single bit to bits");
+	client_test.storage.bits_write_registers.z = true;
+	assert(client_test.start_rtu_frame(233) == OK);
+	r_tie(res, err) = client_test.get_frame_write(bitset_test_2{.z = true});
+	assert(err == OK);
+	std::vector<uint8_t> valid_write_single_bit{233, 5, 0, 35, 255, 0, 106, 216};
+	std::println("Write bit frame: {}", res);
+	assert(res == valid_write_single_bit);
+
+	std::println("Test write multple bits");
+	client_test.storage.bits_write_registers.a = true;
+	client_test.storage.bits_write_registers.c = true;
+	client_test.storage.bits_write_registers.d = true;
+	client_test.storage.bits_write_registers.f = true;
+	client_test.storage.bits_write_registers.e = true;
+	assert(client_test.start_rtu_frame(134) == OK);
+	r_tie(res, err) = client_test.get_frame_write(bitset_test_2{.a = true, .z = true});
+	assert(err == OK);
+	std::println("Write bits frame: {}", res);
+
 	std::println("Test read register from read registers");
 	assert(client_test.start_rtu_frame(1) == OK);
-	auto [res, err] = client_test.get_frame_read(&t::halfs_layout::r1, &t::halfs_layout::r2);
+	r_tie(res, err) = client_test.get_frame_read(&t::halfs_layout::r1, &t::halfs_layout::r2);
 	assert(err == OK);
 	std::vector<uint8_t> valid_read_holding = {0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xc4, 0x0b};
 	std::vector<uint8_t> valid_read_response = {0x01, 0x03, 0x04, 0x00, 0x06, 0x00, 0x05, 0xda, 0x31};
@@ -210,6 +278,7 @@ int main() {
 	client_test.write(uint16_t(3), &t::halfs_write_layout::r1);
 	assert(client_test.start_rtu_frame(17) == OK);
 	r_tie{res, err} = client_test.get_frame_write(&t::halfs_write_layout::r1);
+	std::println("{}", err);
 	assert(err == OK);
 	std::vector<uint8_t> solution1 = {0x11, 0x06, 0x00, 0x00, 0x00, 0x03, 203, 91};
 	std::println("should be: {:}", solution1);

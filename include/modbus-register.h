@@ -16,6 +16,7 @@ constexpr std::string_view IN_PROGRESS{"IN_PROGRESS"};
 constexpr std::string_view INVALID_RESPONSE{"RESPONSE_FROM_SERVER_INVALID"};
 constexpr std::string_view WRONG_ADDR{"WRONG_ADDR"};
 constexpr std::string_view REGISTER_NOT_FULLY_COVERED{"REGISTER_NOT_FULLY_COVERED"};
+constexpr std::string_view BITS_NOT_FULLY_COVERED{"BITS_NOT_FULLY_COVERED"};
 
 template<int N>
 using mod_string = std::array<char, N>;
@@ -26,11 +27,11 @@ constexpr std::string_view to_string_view(const T &s) {
 }
 
 template <typename T>
-constexpr std::span<uint8_t> to_byte_span(T& t) {
-	return std::span<uint8_t>{ reinterpret_cast<uint8_t*>(&t), sizeof(t) };
+constexpr std::span<const uint8_t> to_byte_span(T& t) {
+	return std::span<const uint8_t>{ reinterpret_cast<const uint8_t*>(&t), sizeof(t) };
 }
 
-constexpr uint32_t popcount(std::span<uint8_t> bytes) {
+constexpr uint32_t popcount(std::span<const uint8_t> bytes) {
 	uint32_t bitcount{};
 	for (uint8_t b: bytes)
 		bitcount += std::popcount(b);
@@ -73,9 +74,22 @@ constexpr static result is_register_covered(uint32_t reg_offset, uint32_t reg_co
 	return OK;
 }
 template<typename T>
+constexpr static result is_bit_covered(uint32_t reg_offset, uint32_t reg_count) {
+	constexpr int START = T::OFFSET;
+	constexpr int END = START + sizeof(T) * 8;
+	if (reg_offset < START || END < reg_offset + reg_count)
+		return BITS_NOT_FULLY_COVERED;
+	return OK;
+}
+template<typename T>
 constexpr static uint8_t* get_start_addr(T &r, uint32_t reg_offset) {
 	constexpr int START = T::OFFSET;
 	return reinterpret_cast<uint8_t*>(&r) + (reg_offset - START) * 2;
+}
+template<typename T>
+constexpr static uint8_t* get_bit_start_addr(T &r, uint32_t reg_offset) {
+	constexpr int START = T::OFFSET;
+	return reinterpret_cast<uint8_t*>(&r) + (reg_offset - START) / 8;
 }
 
 struct result_err {
@@ -136,16 +150,16 @@ concept HasHalfs = requires(L l) { l.halfs_registers; };
 template<typename L>
 concept HasWriteHalfs = requires(L l) { l.halfs_write_registers; };
 
-template<typename L, typename Mp>
-concept IsBitsRegister = requires(L l, Mp m) { l.bits_registers.*m; };
-template<typename L, typename Mp>
-concept IsBitsWriteRegister = requires(L l, Mp m) { l.bits_write_registers.*m; };
+template<typename L, typename Reg>
+concept IsBitsRegister = requires(L l, Reg b) { l.bits_registers = b; };
+template<typename L, typename Reg>
+concept IsBitsWriteRegister = requires(L l, Reg b) { l.bits_write_registers = b; };
 template<typename L, typename Mp>
 concept IsHalfsRegister = requires(L l, Mp m) { l.halfs_registers.*m; };
 template<typename L, typename Mp>
 concept IsHalfsWriteRegister = requires(L l, Mp m) { l.halfs_write_registers.*m; };
 template<typename L, typename Mp>
-concept IsValidRegister = IsBitsRegister<L, Mp> || IsBitsWriteRegister<L, Mp> || IsHalfsRegister<L, Mp> || IsHalfsWriteRegister<L, Mp>;
+concept IsValidRegister = IsHalfsRegister<L, Mp> || IsHalfsWriteRegister<L, Mp>;
 
 template<typename L, typename Mp> requires IsBitsRegister<L, Mp>
 constexpr decltype(std::declval<L>().bits_registers) RegisterTypeH();
@@ -307,25 +321,19 @@ struct modbus_register {
 
 	template<typename Reg>
 	requires IsBitsRegisters<Layout, Reg>
-	constexpr result_err get_frame_read(Reg start_bit, Reg end_bit) { 
-		std::span<uint8_t> start_bytes = to_byte_span(start_bit);
-		std::span<uint8_t> end_bytes = to_byte_span(end_bit);
-		if (1 != popcount(start_bytes))
-			return {.err = "EXACTLY_1_BIT_HAS_TO_BE_SET_IN_START_BIT"};
-		if (1 != popcount(end_bytes))
-			return {.err = "EXACTLY_1_BIT_HAS_TO_BE_SET_IN_END_BIT"};
-		uint32_t start_byte = std::ranges::find_if(start_bytes, [](uint8_t e){ return e != 0; }) - start_bytes.begin();
-		uint32_t end_byte = std::ranges::find_if(end_bytes, [](uint8_t e){ return e != 0; }) - end_bytes.begin();
-		uint32_t start_str = start_byte * 8 + std::countr_zero(start_bytes[start_byte]);
-		uint32_t end_str = end_byte * 8 + std::countl_zero(end_bytes[end_byte]) + 1;
+	constexpr result_err get_frame_read(const Reg &mask) { 
+		std::span<const uint8_t> bytes = to_byte_span(mask);
+		if (1 != popcount(bytes) && 2 != popcount(bytes))
+			return {.err = "EXACTLY_1_OR_2_BIT_HAS_TO_BE_SET_IN_START_BIT"};
+		uint32_t start_byte = std::ranges::find_if(bytes, [](uint8_t e){ return e != 0; }) - bytes.begin();
+		uint32_t end_byte{uint32_t(bytes.size()) - 1};
+		for (;end_byte >= 0 && bytes[end_byte] == 0; --end_byte);
+		uint32_t start_str = start_byte * 8 + std::countr_zero(bytes[start_byte]);
+		uint32_t end_str = end_byte * 8 + 8 - std::countl_zero(bytes[end_byte]);
 		uint32_t start_reg = start_str + Reg::OFFSET;
 		register_t reg_type = type_to_register<Layout, Reg>();
 		return _get_frame_read_req(reg_type, start_reg, end_str - start_str);
 	}
-
-	template<typename Reg>
-	requires IsBitsRegisters<Layout, Reg>
-	constexpr result_err get_frame_read(const Reg &read_mask) { return get_frame_read(read_mask, read_mask); }
 
 	template<typename MemA, typename MemB>
 	requires IsValidRegister<Layout, MemA> && IsValidRegister<Layout, MemB>
@@ -345,23 +353,21 @@ struct modbus_register {
 
 	template<typename Reg>
 	requires IsBitsRegisters<Layout, Reg>
-	constexpr result_err get_frame_write(Reg start_bit, Reg end_bit) { 
-		std::span<uint8_t> start_bytes = to_byte_span(start_bit);
-		std::span<uint8_t> end_bytes = to_byte_span(end_bit);
-		if (1 != popcount(start_bytes))
-			return {.err = "EXACTLY_1_BIT_HAS_TO_BE_SET_IN_START_BIT"};
-		if (1 != popcount(end_bytes))
-			return {.err = "EXACTLY_1_BIT_HAS_TO_BE_SET_IN_END_BIT"};
-		uint32_t start_str = std::ranges::find_if(start_bytes, [](uint8_t e){ return e != 0; }) - start_bytes.begin();
-		uint32_t end_str = std::ranges::find_if(end_bytes, [](uint8_t e){ return e != 0; }) - start_bytes.begin() + 1;
+	constexpr result_err get_frame_write(const Reg &mask) { 
+		std::span<const uint8_t> bytes = to_byte_span(mask);
+		if (1 != popcount(bytes) && 2 != popcount(bytes))
+			return {.err = "EXACTLY_1_OR_2_BIT_HAS_TO_BE_SET_IN_START_BIT"};
+		uint32_t start_byte = std::ranges::find_if(bytes, [](uint8_t e){ return e != 0; }) - bytes.begin();
+		uint32_t end_byte{uint32_t(bytes.size()) - 1};
+		for (;end_byte >= 0 && bytes[end_byte] == 0; --end_byte);
+		uint32_t start_str = start_byte * 8 + std::countr_zero(bytes[start_byte]);
+		uint32_t end_str = end_byte * 8 + 8 - std::countl_zero(bytes[end_byte]);
 		uint32_t start_reg = start_str + Reg::OFFSET;
-		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&get_register_ref<Layout, Reg>(storage));
-		return _get_frame_write_req(start_reg, std::span<uint8_t>{str_addr + start_str, str_addr + end_str});
+		register_t reg_type = type_to_register<Layout, Reg>();
+		auto reg = register_ref<Layout, Reg>(storage);
+		uint8_t *start_addr = reinterpret_cast<uint8_t*>(&reg);
+		return _get_frame_write_req(reg_type, start_reg, std::span<uint8_t>{start_addr, sizeof(reg)}, start_str, end_str - start_str);
 	}
-
-	template<typename Reg>
-	requires IsBitsRegisters<Layout, Reg>
-	constexpr result_err get_frame_write(const Reg &read_mask) { return get_frame_write(read_mask, read_mask); }
 
 	#define RES_ERR_ASSERT(cond, msg) if (cond != OK) {buffer.clear(); return {.err = msg};}
 	#define RES_FORWARD(stm) if (result r = stm; r != OK) {buffer.clear(); return {.err = r};}
@@ -385,17 +391,49 @@ struct modbus_register {
 		// data information
 		switch(function_code(*buffer.fc)) {
 		case function_code::READ_COILS:
-			// TODO: implement
-			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+			if constexpr (!HasBits<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_BITS"};
+			} else {
+				RES_FORWARD(is_bit_covered<decltype(storage.bits_registers)>(reg_offset, reg_count));
+				uint16_t n_bytes = (reg_count + 7) / 8;
+				RES_FORWARD(buffer.write_length(n_bytes));
+				uint16_t bit_offset = reg_offset - (reg_count / 8 * 8);
+				uint16_t mask = (1 << bit_offset) - 1;
+				uint8_t *start_addr = get_bit_start_addr(storage.bits_registers, reg_offset);
+				for (uint16_t i: std::ranges::iota_view{reg_offset / 8, reg_offset / 8 + n_bytes}) {
+					uint8_t b = start_addr[i] << bit_offset;
+					if (i + 1 < sizeof(storage.bits_registers))
+						b |= start_addr[i + 1] & mask;
+					RES_FORWARD(buffer.write_data(b));
+				}
+			}
+			break;
 		case function_code::READ_DISCRETE_INPUTS:
-			// TODO: implement
-			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+			if constexpr (!HasWriteBits<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_BITS"};
+			} else {
+				RES_FORWARD(is_bit_covered<decltype(storage.bits_write_registers)>(reg_offset, reg_count));
+				uint16_t n_bytes = (reg_count + 7) / 8;
+				RES_FORWARD(buffer.write_length(n_bytes));
+				uint16_t bit_offset = reg_offset - (reg_count / 8 * 8);
+				uint16_t mask = (1 << bit_offset) - 1;
+				uint8_t *start_addr = get_bit_start_addr(storage.bits_write_registers, reg_offset);
+				for (uint16_t i: std::ranges::iota_view{reg_offset / 8, reg_offset / 8 + n_bytes}) {
+					uint8_t b = start_addr[i] << bit_offset;
+					if (i + 1 < sizeof(storage.bits_write_registers))
+						b |= start_addr[i + 1] & mask;
+					RES_FORWARD(buffer.write_data(b));
+				}
+			}
+			break;
 		case function_code::READ_HOLDING_REGISTERS:
 			if constexpr (!HasHalfs<Layout>) {
 				buffer.clear();
 				return {.err = "LAYOUT_HAS_NO_HALFS"};
 			} else {
-				RES_FORWARD(is_register_covered<decltype(storage.halfs_registers)>(reg_offset, reg_count));
+				RES_FORWARD(is_bit_covered<decltype(storage.halfs_registers)>(reg_offset, reg_count));
 				RES_FORWARD(buffer.write_length(reg_count * 2));
 				uint8_t *start_addr = get_start_addr(storage.halfs_registers, reg_offset);
 				RES_FORWARD(buffer.write_data(std::span<uint8_t>{start_addr, reg_count * 2u}));
@@ -520,11 +558,12 @@ struct modbus_register {
 		lc = get_last_completed();
 		return {buffer.frame_data.span()};
 	}
-	constexpr result_err _get_frame_write_req(register_t reg_type, uint32_t reg_offset, std::span<uint8_t> data) {
+	constexpr result_err _get_frame_write_req(register_t reg_type, uint32_t reg_offset, std::span<uint8_t> data, uint16_t start_bit = 0, uint16_t bit_count = 0) {
+		std::cout << "bit_count " << bit_count << " start_bit " << start_bit << std::endl;
 		switch (reg_type) {
 			case register_t::BITS:        return {.err = "BITS_NOT_ALLOWED"};
 			case register_t::BITS_WRITE:  
-				if (data.size() == 1) {
+				if (bit_count == 1) {
 					RES_FORWARD(buffer.write_fc(function_code::WRITE_SINGLE_COIL)); 
 				}
 				else {
@@ -542,16 +581,42 @@ struct modbus_register {
 				break;
 			default: return {.err = "INVALID_REGISTER_TYPE"};
 		}
+
+		// write offset and size
 		RES_ERR_ASSERT(buffer.write_data(h_byte(reg_offset)), "WRITE_REG_OFF_ERR");
 		RES_ERR_ASSERT(buffer.write_data(l_byte(reg_offset)), "WRITE_REG_OFF_ERR");
 		if (function_code(*buffer.fc) == function_code::WRITE_MULTIPLE_COILS || 
 			function_code(*buffer.fc) == function_code::WRITE_MULTIPLE_REGISTERS) {
-			uint16_t reg_count = data.size() / 2;
+			uint16_t reg_count = reg_type == register_t::HALFS_WRITE ? data.size() / 2 : bit_count;
+			uint8_t byte_count = reg_type == register_t::HALFS_WRITE ? data.size() / 2 : (bit_count + 7) / 8;
 			RES_ERR_ASSERT(buffer.write_data(h_byte(reg_count)), "WRITE_REG_COUNT_ERR");
 			RES_ERR_ASSERT(buffer.write_data(l_byte(reg_count)), "WRITE_REG_COUNT_ERR");
-			RES_ERR_ASSERT(buffer.write_data(data.size()), "WRITE_BYTE_SIZE_ERR");
+			buffer.byte_count = buffer.frame_data.end();
+			RES_ERR_ASSERT(buffer.write_data(byte_count), "WRITE_BYTE_SIZE_ERR");
 		}
-		RES_ERR_ASSERT(buffer.write_data(data), "WRITE_DATA_ERR");
+
+		// write data
+		switch (reg_type) {
+			case register_t::BITS_WRITE:
+				if (bit_count == 1) {
+					std::cout << "not too shabby " << start_bit << ", size " << bit_count << std::endl;
+					uint8_t bit = data[start_bit / 8] & (1 << (start_bit % 8));
+					RES_FORWARD(buffer.write_data(bit ? 0xff: 0));
+					RES_FORWARD(buffer.write_data(0));
+				} else {
+					for (uint32_t cur_bit = start_bit; cur_bit < bit_count; cur_bit += 8) {
+						uint8_t byte = data[cur_bit / 8] & (0xff << (cur_bit % 8));
+						if (cur_bit % 8)
+							byte |= data[cur_bit / 8 + 1] & ((1 << (cur_bit % 8)) - 1);
+						RES_FORWARD(buffer.write_data(byte));
+					}
+				}
+				break;
+			case register_t::HALFS_WRITE:
+				RES_ERR_ASSERT(buffer.write_data(data), "WRITE_DATA_ERR");
+				break;
+			default: break;
+		}
 
 		if (buffer.is_ascii()) {
 			return {.err = "ASCII not implemented yet"};
@@ -618,7 +683,7 @@ struct modbus_register {
 					return {.err = "LAYOUT_HAS_NO_WRITE_BITS"};
 				} else {
 				// TODO: implement
-				storage.write_bits_registers;
+				storage.bits_write_registers;
 				}
 				break;
 			case function_code::READ_HOLDING_REGISTERS:

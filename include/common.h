@@ -250,7 +250,7 @@ struct modbus_frame {
 			reinterpret_cast<uint8_t&>(fc) |= 0x80;
 		this->fc = frame_data.end();
 		RESULT_ASSERT(frame_data.push(uint8_t(fc)), "WRITE_FC_FAILED");
-		if (fc_requires_length(fc, t))
+		if (fc_requires_length(fc, t) && fc >= function_code::READ_COILS && fc <= function_code::READ_INPUT_REGISTERS)
 			cur_state = state::WRITE_LENGTH;
 		else
 			cur_state = state::WRITE_DATA_EC;
