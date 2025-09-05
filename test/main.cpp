@@ -5,6 +5,9 @@
 #include <print>
 #include <ranges>
 
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+
 using namespace libmodbus_static;
 
 bool operator==(std::span<uint8_t> a, std::span<uint8_t> b) {
@@ -363,6 +366,7 @@ int main() {
 	test_server.storage.bits_write_registers.i = true;
 	test_server.write(uint16_t(5), &t::halfs_layout::r3);
 	test_server.write(uint16_t(6), &t::halfs_layout::r4);
+	client_test.storage.bits_write_registers = {};
 
 	std::println("\nRead bits");
 	client_test.start_rtu_frame(1);
@@ -396,6 +400,16 @@ int main() {
 	println("Read bits response: {}", res);
 	std::vector<uint8_t> valid_read_coils_server_response{1, 2, 1, 23, 225, 134};
 	assert(res == valid_read_coils_server_response);
+	client_test.switch_to_response();
+	for (uint8_t b: res | ExcludeLast{})
+		assert(client_test.process_rtu(b).err == IN_PROGRESS);
+	assert(client_test.process_rtu(res.back()).err == OK);
+	assert(client_test.storage.bits_write_registers.a == test_server.storage.bits_write_registers.a);
+	assert(client_test.storage.bits_write_registers.b == test_server.storage.bits_write_registers.b);
+	assert(client_test.storage.bits_write_registers.c == test_server.storage.bits_write_registers.c);
+	assert(client_test.storage.bits_write_registers.d == test_server.storage.bits_write_registers.d);
+	assert(client_test.storage.bits_write_registers.e == test_server.storage.bits_write_registers.e);
+	assert(client_test.storage.bits_write_registers.i != test_server.storage.bits_write_registers.i);
 	test_server.switch_to_request();
 
 	std::println("Read halfs");
@@ -466,7 +480,7 @@ int main() {
 	std::println("Done.\n");
 
 	std::println("");
-	std::println("[  PASS  ] All tests work");
+	std::println(ANSI_COLOR_GREEN "[  PASS  ] All tests work" ANSI_COLOR_RESET);
 
 	return 0;
 }
