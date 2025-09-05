@@ -16,6 +16,10 @@ bool operator==(std::span<uint8_t> a, std::span<uint8_t> b) {
 	return true;
 }
 
+struct ExcludeLast{};
+template<typename T>
+constexpr auto operator|(const T &v, ExcludeLast) { return v | std::ranges::views::take(v.size() - 1); }
+
 struct bitset_test {
 	constexpr static int OFFSET{20};
 	bool a: 1{};
@@ -211,17 +215,43 @@ int main() {
 	std::vector<uint8_t> valid_write_single_bit{233, 5, 0, 35, 255, 0, 106, 216};
 	std::println("Write bit frame: {}", res);
 	assert(res == valid_write_single_bit);
+	client_test.switch_to_response();
+	for (uint8_t res_byte: valid_write_single_bit | ExcludeLast{})
+		assert(client_test.process_rtu(res_byte).err == IN_PROGRESS);
+	assert(client_test.process_rtu(valid_write_single_bit.back()).err == OK);
 
-	std::println("Test write multple bits");
+	std::println("Test write multiple bits");
 	client_test.storage.bits_write_registers.a = true;
 	client_test.storage.bits_write_registers.c = true;
 	client_test.storage.bits_write_registers.d = true;
-	client_test.storage.bits_write_registers.f = true;
 	client_test.storage.bits_write_registers.e = true;
+	client_test.storage.bits_write_registers.f = true;
+	client_test.storage.bits_write_registers.i = true;
+	// byte bits ordering:
+	// h g f e d c b a   $ $ $ $ $ $ $ i
+	// which should result in the follwing bits
+	// 0 0 1 1 1 1 0 1   0 0 0 0 0 0 0 1
+	// which is in hex
+	// 0x3d 0x1
+	//
+	// with offset 2:
+	// j i h g f e d c   $ $ $ $ $ $ $ $
+	// which should result in the follwing bits
+	// 0 1 0 0 1 1 1 1   0 0 0 0 0 0 0 0
+	// which is in hex
+	// 0x4f 0x00
 	assert(client_test.start_rtu_frame(134) == OK);
 	r_tie(res, err) = client_test.get_frame_write(bitset_test_2{.a = true, .z = true});
 	assert(err == OK);
 	std::println("Write bits frame: {}", res);
+	std::vector<uint8_t> write_multiple_bits_all_ref{134, 15, 0, 10, 0, 26, 4, 61, 1, 0, 2, 47, 182};
+	assert(res == write_multiple_bits_all_ref);
+	assert(client_test.start_rtu_frame(134) == OK);
+	r_tie(res, err) = client_test.get_frame_write(bitset_test_2{.c = true, .z = true});
+	assert(err == OK);
+	std::println("Write bits frame start bit 3: {}", res);
+	std::vector<uint8_t> write_multiple_bits_offset_ref{134, 15, 0, 12, 0, 24, 3, 79, 0, 128, 10, 49};
+	assert(res == write_multiple_bits_offset_ref);
 
 	std::println("Test read register from read registers");
 	assert(client_test.start_rtu_frame(1) == OK);
@@ -319,11 +349,56 @@ int main() {
 	std::cout << "Server tests\n";
 	std::cout << "---------------------------------------------------------------------------------------\n";
 
-	std::println("\nRead halfs");
 	modbus_register<test_layout>& test_server{modbus_register<test_layout>::Default<1>(1)};
+	test_server.storage.bits_registers.a = true;
+	test_server.storage.bits_registers.c = true;
+	test_server.storage.bits_registers.d = true;
+	test_server.storage.bits_registers.e = true;
+	test_server.storage.bits_registers.f = true;
+	test_server.storage.bits_registers.i = true;
+	test_server.storage.bits_write_registers.b = true;
+	test_server.storage.bits_write_registers.c = true;
+	test_server.storage.bits_write_registers.d = true;
+	test_server.storage.bits_write_registers.f = true;
+	test_server.storage.bits_write_registers.i = true;
 	test_server.write(uint16_t(5), &t::halfs_layout::r3);
 	test_server.write(uint16_t(6), &t::halfs_layout::r4);
 
+	std::println("\nRead bits");
+	client_test.start_rtu_frame(1);
+	// i h g f e d c b
+	// 0 0 0 1 1 1 1 0 - 0x1e
+	r_tie{res, err} = client_test.get_frame_read(bitset_test{.b = true, .f = true});
+	println("Read bits request: {}", res);
+	assert(err == OK);
+	for (uint8_t b: res | ExcludeLast{})
+		assert(test_server.process_rtu(b).err == IN_PROGRESS);
+	assert(test_server.process_rtu(res.back()).err == OK);
+	r_tie{res, err} = test_server.get_frame_response();
+	assert(err == OK);
+	println("Read bits response: {}", res);
+	std::vector<uint8_t> valid_read_coils_response{1, 1, 1, 30, 209, 128};
+	assert(res == valid_read_coils_response);
+	test_server.switch_to_request();
+
+	std::println("Read write bits");
+	client_test.start_rtu_frame(1);
+	// i h g f e d c b
+	// 0 0 0 1 0 1 1 1 - 0x17
+	r_tie{res, err} = client_test.get_frame_read(bitset_test_2{.b = true, .f = true});
+	println("Read bits request: {}", res);
+	assert(err == OK);
+	for (uint8_t b: res | ExcludeLast{})
+		assert(test_server.process_rtu(b).err == IN_PROGRESS);
+	assert(test_server.process_rtu(res.back()).err == OK);
+	r_tie{res, err} = test_server.get_frame_response();
+	assert(err == OK);
+	println("Read bits response: {}", res);
+	std::vector<uint8_t> valid_read_coils_server_response{1, 2, 1, 23, 225, 134};
+	assert(res == valid_read_coils_server_response);
+	test_server.switch_to_request();
+
+	std::println("Read halfs");
 	std::println("Bad address");
 	client_test.start_rtu_frame(31);
 	r_tie{res, err} = client_test.get_frame_read(&t::halfs_layout::r3, &t::halfs_layout::r4);
@@ -389,6 +464,9 @@ int main() {
 	assert(res == tcp_valid_response);
 
 	std::println("Done.\n");
+
+	std::println("");
+	std::println("[  PASS  ] All tests work");
 
 	return 0;
 }

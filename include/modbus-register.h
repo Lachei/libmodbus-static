@@ -9,6 +9,7 @@
 
 //TODO: remove
 #include <iostream>
+#include <bitset>
 
 namespace libmodbus_static {
 
@@ -43,6 +44,7 @@ constexpr uintptr_t to_uint_ptr(T member) {
 	return *reinterpret_cast<uintptr_t*>(&member);
 }
 
+// byte swapping for little endian systems
 template<typename T>
 struct swap_byte_order {
 	constexpr void operator()(T src, T& dst) const { 
@@ -52,8 +54,11 @@ struct swap_byte_order {
 				reinterpret_cast<uint8_t*>(&src) + byte, sizeof(uint8_t)); 
 	}
 };
+// no byte swapping for byte sequences and if system is big endian (same ordering as modbus bytes)
+template<typename T>
+concept IsByteSequence = requires (T t) { sizeof(*t.data()) == 1; t = t; };
 template<typename T> 
-requires requires (T t) { sizeof(*t.data()) == 1; t = t; }
+requires IsByteSequence<T> || (std::endian::native == std::endian::big)
 struct swap_byte_order<T> {
 	constexpr void operator()(const T &src, T &dst) const {
 		dst = src;
@@ -90,6 +95,37 @@ template<typename T>
 constexpr static uint8_t* get_bit_start_addr(T &r, uint32_t reg_offset) {
 	constexpr int START = T::OFFSET;
 	return reinterpret_cast<uint8_t*>(&r) + (reg_offset - START) / 8;
+}
+template<typename T>
+constexpr static void read_bits_from_storage(T &bits, int reg_offset, int reg_count, uint8_t *dst) {
+	uint8_t *data = reinterpret_cast<uint8_t*>(&bits);
+	int start_bit = reg_offset - std::decay_t<decltype(bits)>::OFFSET;
+	for (int cur_bit = start_bit; cur_bit < (start_bit + reg_count); cur_bit += 8) {
+		uint8_t i = cur_bit / 8;
+		uint8_t r = cur_bit % 8;
+		uint8_t s = reg_count - (cur_bit - start_bit);
+		uint8_t t = s < 8 ? ((1 << s) - 1): 0xff;
+		uint8_t byte = (data[i] >> r) & t;
+		if (r && s > r)
+			byte |= (data[i + 1] << (8 - r)) & t;
+		*dst++ = byte;
+	}
+}
+template<typename T>
+constexpr static void write_bits_to_storage(T &bits, int reg_offset, int reg_count, uint8_t *data) {
+	constexpr int START = T::OFFSET;
+	uint8_t *dst = reinterpret_cast<uint8_t*>(&bits);
+	for (int cur_bit = reg_offset - START, cur_data = 0; 
+		cur_bit < reg_offset - START + reg_count; 
+		cur_bit += 8, ++cur_data) {
+		// clear bits to be written via or
+		dst[cur_bit / 8] &= 0xff >> (8 - (cur_bit % 8));
+		dst[cur_bit / 8] |= data[cur_data] << (cur_bit % 8);
+		if (cur_bit % 8) {
+			dst[cur_bit / 8 + 1] &= 0xff << (cur_bit % 8);
+			dst[cur_bit / 8 + 1] |= data[cur_data] >> (8 - (cur_bit % 8));
+		}
+	}
 }
 
 struct result_err {
@@ -215,7 +251,7 @@ struct modbus_register {
 	static modbus_register& Default(uint8_t address) { static modbus_register r{.addr = address}; return r; }
 
 	const uint8_t addr{};
-	Layout storage{}; // do not access directly, contains data already byte swapped, read and write with read() and write()
+	Layout storage{};
 	modbus_frame<MAX_SIZE> buffer{};
 	struct last_completed{
 		transport_t transport{};
@@ -398,15 +434,9 @@ struct modbus_register {
 				RES_FORWARD(is_bit_covered<decltype(storage.bits_registers)>(reg_offset, reg_count));
 				uint16_t n_bytes = (reg_count + 7) / 8;
 				RES_FORWARD(buffer.write_length(n_bytes));
-				uint16_t bit_offset = reg_offset - (reg_count / 8 * 8);
-				uint16_t mask = (1 << bit_offset) - 1;
-				uint8_t *start_addr = get_bit_start_addr(storage.bits_registers, reg_offset);
-				for (uint16_t i: std::ranges::iota_view{reg_offset / 8, reg_offset / 8 + n_bytes}) {
-					uint8_t b = start_addr[i] << bit_offset;
-					if (i + 1 < sizeof(storage.bits_registers))
-						b |= start_addr[i + 1] & mask;
-					RES_FORWARD(buffer.write_data(b));
-				}
+				uint8_t *dst = buffer.frame_data.end();
+				RES_FORWARD(buffer.write_data(std::span<uint8_t>((uint8_t*)nullptr, n_bytes)));
+				read_bits_from_storage(storage.bits_registers, reg_offset, reg_count, dst);
 			}
 			break;
 		case function_code::READ_DISCRETE_INPUTS:
@@ -417,15 +447,9 @@ struct modbus_register {
 				RES_FORWARD(is_bit_covered<decltype(storage.bits_write_registers)>(reg_offset, reg_count));
 				uint16_t n_bytes = (reg_count + 7) / 8;
 				RES_FORWARD(buffer.write_length(n_bytes));
-				uint16_t bit_offset = reg_offset - (reg_count / 8 * 8);
-				uint16_t mask = (1 << bit_offset) - 1;
-				uint8_t *start_addr = get_bit_start_addr(storage.bits_write_registers, reg_offset);
-				for (uint16_t i: std::ranges::iota_view{reg_offset / 8, reg_offset / 8 + n_bytes}) {
-					uint8_t b = start_addr[i] << bit_offset;
-					if (i + 1 < sizeof(storage.bits_write_registers))
-						b |= start_addr[i + 1] & mask;
-					RES_FORWARD(buffer.write_data(b));
-				}
+				uint8_t *dst = buffer.frame_data.end();
+				RES_FORWARD(buffer.write_data(std::span<uint8_t>((uint8_t*)nullptr, n_bytes)));
+				read_bits_from_storage(storage.bits_write_registers, reg_offset, reg_count, dst);
 			}
 			break;
 		case function_code::READ_HOLDING_REGISTERS:
@@ -451,8 +475,26 @@ struct modbus_register {
 			}
 			break;
 		case function_code::WRITE_SINGLE_COIL:
-			// TODO: implement
-			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+			if constexpr (!HasWriteBits<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
+			} else {
+				RES_FORWARD(is_bit_covered<decltype(storage.bits_write_registers)>(reg_offset, 1));
+				RES_BOOL_ASSERT(buffer.data, "MISSING_DATA_IN_FRAME");
+				int bit = reg_offset - decltype(storage.bits_write_registers)::OFFSET;
+				bool bit_on{};
+				switch ((*buffer.data << 8) | (*(buffer.data + 1))) {
+					case 0xff00: bit_on = true; break;
+					case 0x0000: bit_on = true; break;
+					default: buffer.clear(); return {.err = "INVALID_COIL_WRITE_DATA"};
+				}
+				uint8_t *data = reinterpret_cast<uint8_t*>(&storage.bits_write_registers);
+				if (bit_on)
+					data[bit / 8] |= 1 << (bit % 8);
+				else
+					data[bit / 8] &= ~(1 << (bit % 8));
+			}
+			break;
 		case function_code::WRITE_SINGLE_REGISTER:
 			if constexpr (!HasWriteHalfs<Layout>) {
 				buffer.clear();
@@ -465,8 +507,15 @@ struct modbus_register {
 			}
 			break;
 		case function_code::WRITE_MULTIPLE_COILS:
-			// TODO: implement
-			RES_BOOL_ASSERT(false, "NOT_IMPLEMENTED");
+			if constexpr (!HasWriteBits<Layout>) {
+				buffer.clear();
+				return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
+			} else {
+				RES_FORWARD(is_bit_covered<decltype(storage.bits_registers)>(reg_offset, reg_count));
+				RES_BOOL_ASSERT(buffer.data && buffer.byte_count, "MISSING_DATA_IN_FRAME");
+				write_bits_to_storage(storage.bits_registers, reg_offset, reg_count, buffer.data);
+			}
+			break;
 		case function_code::WRITE_MULTIPLE_REGISTERS:
 			if constexpr (!HasWriteHalfs<Layout>) {
 				buffer.clear();
@@ -559,7 +608,6 @@ struct modbus_register {
 		return {buffer.frame_data.span()};
 	}
 	constexpr result_err _get_frame_write_req(register_t reg_type, uint32_t reg_offset, std::span<uint8_t> data, uint16_t start_bit = 0, uint16_t bit_count = 0) {
-		std::cout << "bit_count " << bit_count << " start_bit " << start_bit << std::endl;
 		switch (reg_type) {
 			case register_t::BITS:        return {.err = "BITS_NOT_ALLOWED"};
 			case register_t::BITS_WRITE:  
@@ -599,15 +647,14 @@ struct modbus_register {
 		switch (reg_type) {
 			case register_t::BITS_WRITE:
 				if (bit_count == 1) {
-					std::cout << "not too shabby " << start_bit << ", size " << bit_count << std::endl;
 					uint8_t bit = data[start_bit / 8] & (1 << (start_bit % 8));
 					RES_FORWARD(buffer.write_data(bit ? 0xff: 0));
 					RES_FORWARD(buffer.write_data(0));
 				} else {
 					for (uint32_t cur_bit = start_bit; cur_bit < bit_count; cur_bit += 8) {
-						uint8_t byte = data[cur_bit / 8] & (0xff << (cur_bit % 8));
+						uint8_t byte = data[cur_bit / 8] >> (cur_bit % 8);
 						if (cur_bit % 8)
-							byte |= data[cur_bit / 8 + 1] & ((1 << (cur_bit % 8)) - 1);
+							byte |= data[cur_bit / 8 + 1] << (8 - (cur_bit % 8));
 						RES_FORWARD(buffer.write_data(byte));
 					}
 				}
@@ -674,7 +721,9 @@ struct modbus_register {
 					buffer.clear();
 					return {.err = "LAYOUT_HAS_NO_BITS"};
 				} else {
-				// TODO: implement
+					RES_FORWARD(is_bit_covered<decltype(storage.bits_registers)>(reg_offset, reg_count));
+					RES_BOOL_ASSERT(buffer.data && buffer.byte_count, "INCOMPLETE_RESPONSE");
+					write_bits_to_storage(storage.bits_registers, reg_offset, reg_count, buffer.data);
 				}
 				break;
 			case function_code::READ_DISCRETE_INPUTS:
@@ -682,8 +731,9 @@ struct modbus_register {
 					buffer.clear();
 					return {.err = "LAYOUT_HAS_NO_WRITE_BITS"};
 				} else {
-				// TODO: implement
-				storage.bits_write_registers;
+					RES_FORWARD(is_bit_covered<decltype(storage.bits_write_registers)>(reg_offset, reg_count));
+					RES_BOOL_ASSERT(buffer.data && buffer.byte_count, "INCOMPLETE_RESPONSE");
+					write_bits_to_storage(storage.bits_write_registers, reg_offset, reg_count, buffer.data);
 				}
 				break;
 			case function_code::READ_HOLDING_REGISTERS:
@@ -691,38 +741,24 @@ struct modbus_register {
 					buffer.clear();
 					return {.err = "LAYOUT_HAS_NO_HALFS"};
 				} else {
-				constexpr int START = decltype(storage.halfs_registers)::OFFSET;
-				constexpr int END = START + sizeof(storage.halfs_registers) / 2;
-				if (reg_offset < START || reg_offset + reg_count > END) {
-					buffer.clear();
-					return {.err = "REG_OUT_OF_BOUNDS"};
-				}
-				if (!buffer.data || !buffer.byte_count) {
-					buffer.clear();
-					return {.err = "INCOMPLETE_RESPONSE"};
-				}
-				std::copy_n(buffer.data, *buffer.byte_count, 
-					reinterpret_cast<uint8_t*>(&storage.halfs_registers) + (reg_offset - START) * 2);
-				}
+					constexpr int START = decltype(storage.halfs_registers)::OFFSET;
+					RES_FORWARD(is_register_covered<decltype(storage.halfs_registers)>(reg_offset, reg_count));
+					RES_BOOL_ASSERT(buffer.data && buffer.byte_count, "INCOMPLETE_RESPONSE");
+					std::copy_n(buffer.data, *buffer.byte_count, 
+						reinterpret_cast<uint8_t*>(&storage.halfs_registers) + (reg_offset - START) * 2);
+					}
 				break;
 			case function_code::READ_INPUT_REGISTERS:
 				if constexpr (!HasWriteHalfs<Layout>) {
 					buffer.clear();
 					return {.err = "LAYOUT_HAS_NO_WRITE_HALFS"};
 				} else {
-				constexpr int START = decltype(storage.halfs_write_registers)::OFFSET;
-				constexpr int END = START + sizeof(storage.halfs_write_registers) / 2;
-				if (reg_offset < START || reg_offset + reg_count > END) {
-					buffer.clear();
-					return {.err = "REG_OUT_OF_BOUNDS"};
-				}
-				if (!buffer.data || !buffer.byte_count) {
-					buffer.clear();
-					return {.err = "INCOMPLETE_RESPONSE"};
-				}
-				std::copy_n(buffer.data, *buffer.byte_count, 
-					reinterpret_cast<uint8_t*>(&storage.halfs_write_registers) + (reg_offset - START) * 2);
-				}
+					constexpr int START = decltype(storage.halfs_write_registers)::OFFSET;
+					RES_FORWARD(is_register_covered<decltype(storage.halfs_write_registers)>(reg_offset, reg_count));
+					RES_BOOL_ASSERT(buffer.data && buffer.byte_count, "INCOMPLETE_RESPONSE");
+					std::copy_n(buffer.data, *buffer.byte_count, 
+						reinterpret_cast<uint8_t*>(&storage.halfs_write_registers) + (reg_offset - START) * 2);
+					}
 				break;
 			default: break;
 			}
