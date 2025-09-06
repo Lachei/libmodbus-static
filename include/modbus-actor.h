@@ -24,7 +24,7 @@ constexpr std::string_view SERVER_CANT_RESPOND = "SERVER_CANT_RESPOND";
 */
 template<typename Layout, typename DATA_IO>
 struct modbus_actor: public modbus_register<Layout> {
-	modbus_actor(uint8_t address): modbus_register<Layout>(address) { io.init(); }
+	modbus_actor(uint8_t address, const DATA_IO &io = {}): modbus_register<Layout>(address), io{io} { this->io.init(); }
 	~modbus_actor() { io.deinit(); }
 
 	DATA_IO io{};
