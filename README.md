@@ -1,12 +1,12 @@
 # libmodbus-static
 
-A c++ template based modbus library which is independent of the underlying transport (eg. Modbus-RTU, Modbus-TCP), and mmodbus-register-layout definition via c++ structs which does not require **any** dynamic memory allocations.
+A c++ template based modbus library which is independent of the underlying transport (eg. Modbus-RTU, Modbus-TCP), and modbus-register-layout definition via c++ structs which does not require **any** dynamic memory allocations.
 
 This enables high portability as no transport specific code is included, albeit at the cost of having to write a bit of additional code for working transport adoption.
 
 The main approach to using the library is to create a modbus actor which can then be run as server or client.
 
-All registers can the be addressed in a named manner, so modbus addresses mapping has to be kept in code.
+All registers can the be addressed in a named manner, so no modbus address mapping has to be kept in code.
 
 # Standard usage
 
