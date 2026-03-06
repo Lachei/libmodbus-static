@@ -349,7 +349,7 @@ struct modbus_register {
 		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
 		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
 		register_t reg_type = type_to_register<Layout, MemA>();
-		return _get_frame_read_req(reg_type, start_reg, (end_str - start_str) / sizeof(uint16_t));
+		return get_frame_read(reg_type, start_reg, (end_str - start_str) / sizeof(uint16_t));
 	}
 	template<typename Mem>
 	requires IsValidRegister<Layout, Mem>
@@ -368,7 +368,7 @@ struct modbus_register {
 		uint32_t end_str = end_byte * 8 + 8 - std::countl_zero(bytes[end_byte]);
 		uint32_t start_reg = start_str + Reg::OFFSET;
 		register_t reg_type = type_to_register<Layout, Reg>();
-		return _get_frame_read_req(reg_type, start_reg, end_str - start_str);
+		return get_frame_read(reg_type, start_reg, end_str - start_str);
 	}
 
 	template<typename MemA, typename MemB>
@@ -380,7 +380,7 @@ struct modbus_register {
 		uint32_t end_str = to_uint_ptr(member_b) + sizeof(reg.*member_b);
 		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
 		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
-		return _get_frame_write_req(type, start_reg, std::span<uint8_t>{str_addr + start_str, str_addr + end_str});
+		return get_frame_write(type, start_reg, std::span<uint8_t>{str_addr + start_str, str_addr + end_str});
 	}
 
 	template<typename Mem>
@@ -402,7 +402,7 @@ struct modbus_register {
 		register_t reg_type = type_to_register<Layout, Reg>();
 		auto reg = register_ref<Layout, Reg>(storage);
 		uint8_t *start_addr = reinterpret_cast<uint8_t*>(&reg);
-		return _get_frame_write_req(reg_type, start_reg, std::span<uint8_t>{start_addr, sizeof(reg)}, start_str, end_str - start_str);
+		return get_frame_write(reg_type, start_reg, std::span<uint8_t>{start_addr, sizeof(reg)}, start_str, end_str - start_str);
 	}
 
 	#define RES_ERR_ASSERT(cond, msg) if (cond != OK) {buffer.clear(); return {.err = msg};}
@@ -586,7 +586,7 @@ struct modbus_register {
 	// Internal frame fill functions
 	// ---------------------------------------------------------------------------------------
 	// Client
-	constexpr result_err _get_frame_read_req(register_t reg_type, uint32_t reg_offset, uint32_t reg_count) {
+	constexpr result_err get_frame_read(register_t reg_type, uint32_t reg_offset, uint32_t reg_count) {
 		switch (reg_type) {
 			case register_t::BITS:        RES_FORWARD(buffer.write_fc(function_code::READ_COILS)); break;
 			case register_t::BITS_WRITE:  RES_FORWARD(buffer.write_fc(function_code::READ_DISCRETE_INPUTS)); break;
@@ -607,7 +607,7 @@ struct modbus_register {
 		lc = get_last_completed();
 		return {buffer.frame_data.span()};
 	}
-	constexpr result_err _get_frame_write_req(register_t reg_type, uint32_t reg_offset, std::span<uint8_t> data, uint16_t start_bit = 0, uint16_t bit_count = 0) {
+	constexpr result_err get_frame_write(register_t reg_type, uint32_t reg_offset, std::span<uint8_t> data, uint16_t start_bit = 0, uint16_t bit_count = 0) {
 		switch (reg_type) {
 			case register_t::BITS:        return {.err = "BITS_NOT_ALLOWED"};
 			case register_t::BITS_WRITE:  

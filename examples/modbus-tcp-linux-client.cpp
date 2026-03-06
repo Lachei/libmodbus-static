@@ -57,7 +57,7 @@ struct tcp_io {
 };
 
 int main() {
-	modbus_actor<fronius_meter::layout, tcp_io> modbus_client{0, tcp_io{"127.0.0.1"}};
+	modbus_actor modbus_client{0, fronius_meter::layout{}, tcp_io{"127.0.0.1"}};
 	modbus_client.write(1.0f, &fronius_meter::halfs_layout::pf);
 	
 	result r = modbus_client.read_remote(1, &fronius_meter::halfs_layout::pfpha, &fronius_meter::halfs_layout::pfphc);
