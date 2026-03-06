@@ -250,7 +250,7 @@ struct modbus_register {
 	template<int slot = 0>
 	static modbus_register& Default(uint8_t address) { static modbus_register r{.addr = address}; return r; }
 
-	const uint8_t addr{};
+	uint8_t addr{};
 	Layout storage{};
 	modbus_frame<MAX_SIZE> buffer{};
 	struct last_completed{
@@ -592,6 +592,7 @@ struct modbus_register {
 			case register_t::BITS_WRITE:  RES_FORWARD(buffer.write_fc(function_code::READ_DISCRETE_INPUTS)); break;
 			case register_t::HALFS:       RES_FORWARD(buffer.write_fc(function_code::READ_HOLDING_REGISTERS)); break;
 			case register_t::HALFS_WRITE: RES_FORWARD(buffer.write_fc(function_code::READ_INPUT_REGISTERS)); break;
+			default:;
 		}
 
 		RES_ERR_ASSERT(buffer.write_data(h_byte(reg_offset)), "WRITE_REG_OFF_ERR");
