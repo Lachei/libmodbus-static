@@ -143,7 +143,7 @@ struct static_byte_vector {
 	constexpr const uint8_t* begin() const { return storage.begin(); }
 	constexpr const uint8_t* end() const { return storage.begin() + cur_size; }
 	constexpr uint8_t* push() { if (cur_size >= N) return {}; return storage.data() + cur_size++; }
-	constexpr bool push(uint8_t e) { if (cur_size == N) return false; storage[cur_size++] = e; return true; }
+	constexpr bool push(uint8_t e) { if (cur_size >= N) return false; storage[cur_size++] = e; return true; }
 	constexpr void clear() { cur_size = 0; }
 	constexpr bool empty() const { return cur_size == 0; }
 	constexpr int size() const { return cur_size; }

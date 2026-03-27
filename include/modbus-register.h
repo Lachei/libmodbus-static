@@ -39,11 +39,6 @@ constexpr uint32_t popcount(std::span<const uint8_t> bytes) {
 	return bitcount;
 }
 
-template<typename T>
-constexpr uintptr_t to_uint_ptr(T member) {
-	return *reinterpret_cast<uintptr_t*>(&member);
-}
-
 // byte swapping for little endian systems
 template<typename T>
 struct swap_byte_order {
@@ -344,8 +339,8 @@ struct modbus_register {
 	requires IsValidRegister<Layout, MemA> && IsValidRegister<Layout, MemB>
 	constexpr result_err get_frame_read(MemA member_a, MemB member_b) {
 		auto reg = register_ref<Layout, MemA>(storage);
-		uint32_t start_str = to_uint_ptr(member_a);
-		uint32_t end_str = to_uint_ptr(member_b) + sizeof(reg.*member_b);
+		uint32_t start_str = uintptr_t(reinterpret_cast<uint8_t*>(&(reg.*member_a)) - reinterpret_cast<uint8_t*>(&reg));
+		uint32_t end_str = uintptr_t(reinterpret_cast<uint8_t*>(&(reg.*member_b)) - reinterpret_cast<uint8_t*>(&reg)) + sizeof(reg.*member_b);
 		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
 		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
 		register_t reg_type = type_to_register<Layout, MemA>();
@@ -376,8 +371,8 @@ struct modbus_register {
 	constexpr result_err get_frame_write(MemA member_a, MemB member_b) {
 		auto reg = register_ref<Layout, MemA>(storage);
 		register_t type = type_to_register<Layout, MemA>();
-		uint32_t start_str = to_uint_ptr(member_a);
-		uint32_t end_str = to_uint_ptr(member_b) + sizeof(reg.*member_b);
+		uint32_t start_str = uintptr_t(reinterpret_cast<uint8_t*>(&(reg.*member_a)) - reinterpret_cast<uint8_t*>(&reg));
+		uint32_t end_str = uintptr_t(reinterpret_cast<uint8_t*>(&(reg.*member_b)) - reinterpret_cast<uint8_t*>(&reg)) + sizeof(reg.*member_b);
 		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
 		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
 		return get_frame_write(type, start_reg, std::span<uint8_t>{str_addr + start_str, str_addr + end_str});
