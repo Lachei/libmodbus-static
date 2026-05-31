@@ -1,6 +1,7 @@
 #pragma once
 
 #include "modbus-register.h"
+#include <functional>
 #include <chrono>
 
 namespace libmodbus_static {
@@ -10,6 +11,8 @@ using ms = std::chrono::milliseconds;
 constexpr std::string_view TIMEOUT = "TIMEOUT";
 constexpr std::string_view CLIENT_CANT_QUERY = "CLIENT_CANT_QUERY";
 constexpr std::string_view SERVER_CANT_RESPOND = "SERVER_CANT_RESPOND";
+
+struct at_scope_end {std::function<void()> &f; ~at_scope_end() {if (f) f();} };
 
 /**
 * Modbus actor to be used as a simple full modbus actor based on the modbus-register
@@ -24,10 +27,18 @@ constexpr std::string_view SERVER_CANT_RESPOND = "SERVER_CANT_RESPOND";
 */
 template<typename Layout, typename DATA_IO>
 struct modbus_actor: public modbus_register<Layout> {
-	modbus_actor(uint8_t address, const Layout &storage_init, const DATA_IO &io = {}): modbus_register<Layout>(address, storage_init), io{io} { this->io.init(); }
+	modbus_actor(uint8_t address, const Layout &storage_init, const DATA_IO &io = {}, 
+	      std::function<void()> pre_data_send_cb = {}, std::function<void()> post_data_send_cb = {})
+		: modbus_register<Layout>(address, storage_init), io{io}, pre_data_send_cb{std::move(pre_data_send_cb)}, 
+		  post_data_send_cb{std::move(post_data_send_cb)} { this->io.init(); }
+	modbus_actor(uint8_t address, std::function<void()> pre_data_send_cb = {}, std::function<void()> post_data_send_cb = {})
+		: modbus_register<Layout>(address), pre_data_send_cb{std::move(pre_data_send_cb)}, 
+		  post_data_send_cb{std::move(post_data_send_cb)} { this->io.init(); }
 	~modbus_actor() { io.deinit(); }
 
 	DATA_IO io{};
+	std::function<void()> pre_data_send_cb{}; // called after getting a response_frame
+	std::function<void()> post_data_send_cb{}; // called after data was sent/error has finished (guaranteed to run after a request frame)
 	uint16_t _tcp_trans{1};
 
 	result poll_update_state(ms max_timeout) {
@@ -43,6 +54,9 @@ struct modbus_actor: public modbus_register<Layout> {
 			}
 			if (state == IN_PROGRESS)
 				continue;
+			if (pre_data_send_cb)
+				pre_data_send_cb();
+			at_scope_end at_end{post_data_send_cb};
 			std::span<uint8_t> frame;
 			if (state != OK) {
 				r_tie{frame, state} = this->get_frame_error_response(state);
@@ -59,7 +73,7 @@ struct modbus_actor: public modbus_register<Layout> {
 					return state;
 				}
 			}
-			this->write_bytes(frame);
+			io.write_bytes(frame);
 			this->switch_to_request();
 		}
 		return state;
@@ -71,10 +85,13 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (this->addr != 0)
 			return CLIENT_CANT_QUERY;
 		if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU) {
-			if (result r = start_modbus_frame(this->addr); r != OK) return r;
+			if (result r = this->start_rtu_frame(this->addr); r != OK) return r;
 		} else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP) {
 			if (result r = this->start_tcp_frame(_tcp_trans++, addr); r != OK) return r;
 		}
+		if (pre_data_send_cb)
+			pre_data_send_cb();
+		at_scope_end at_end{post_data_send_cb};
 		auto [res, err] = this->get_frame_read(member_a, member_b);
 		if (err != OK)
 			return err;
@@ -98,17 +115,20 @@ struct modbus_actor: public modbus_register<Layout> {
 	}
 	template<typename Mem>
 	requires IsValidRegister<Layout, Mem>
-	constexpr result read_remote(uint8_t addr, Mem mem, ms timeout = ms(20e3)) { return read_remote<Mem, Mem>(addr, mem, mem, timeout); }
+	constexpr result read_remote(uint8_t addr, Mem mem, ms timeout = ms(20'000)) { return read_remote<Mem, Mem>(addr, mem, mem, timeout); }
 	template<typename Reg>
 	requires IsBitsRegisters<Layout, Reg>
-	constexpr result read_remote(uint8_t addr, const Reg &mask, ms timeout = ms(20e3)) {
+	constexpr result read_remote(uint8_t addr, const Reg &mask, ms timeout = ms(20'000)) {
 		if (this->addr != 0)
 			return CLIENT_CANT_QUERY;
 		if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU) {
-			if (result r = this->start_modbus_frame(addr); r != OK) return r;
+			if (result r = this->start_rtu_frame(addr); r != OK) return r;
 		} else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP) {
 			if (result r = this->start_tcp_frame(_tcp_trans++, addr); r != OK) return r;
 		}
+		if (pre_data_send_cb)
+			pre_data_send_cb();
+		at_scope_end at_end{post_data_send_cb};
 		auto [res, err] = this->get_frame_read(mask);
 		if (err != OK)
 			return err;
@@ -135,10 +155,13 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (this->addr != 0)
 			return CLIENT_CANT_QUERY;
 		if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU) {
-			if (result r = this->start_modbus_frame(addr); r != OK) return r;
+			if (result r = this->start_rtu_frame(addr); r != OK) return r;
 		} else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP) {
 			if (result r = this->start_tcp_frame(_tcp_trans++, addr); r != OK) return r;
 		}
+		if (pre_data_send_cb)
+			pre_data_send_cb();
+		at_scope_end at_end{post_data_send_cb};
 		auto [res, err] = this->get_frame_write(member_a, member_b);
 		if (err != OK)
 			return err;
@@ -167,10 +190,13 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (this->addr != 0)
 			return CLIENT_CANT_QUERY;
 		if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU) {
-			if (result r = this->start_modbus_frame(addr); r != OK) return r;
+			if (result r = this->start_rtu_frame(addr); r != OK) return r;
 		} else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP) {
 			if (result r = this->start_tcp_frame(_tcp_trans++, addr); r != OK) return r;
 		}
+		if (pre_data_send_cb)
+			pre_data_send_cb();
+		at_scope_end at_end{post_data_send_cb};
 		auto [res, err] = this->get_frame_write(mask);
 		if (err != OK)
 			return err;

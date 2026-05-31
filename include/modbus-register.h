@@ -342,7 +342,6 @@ struct modbus_register {
 		uint32_t start_str = uintptr_t(reinterpret_cast<uint8_t*>(&(reg.*member_a)) - reinterpret_cast<uint8_t*>(&reg));
 		uint32_t end_str = uintptr_t(reinterpret_cast<uint8_t*>(&(reg.*member_b)) - reinterpret_cast<uint8_t*>(&reg)) + sizeof(reg.*member_b);
 		uint32_t start_reg = start_str / sizeof(uint16_t) + OFFSET<Layout, MemA>();
-		uint8_t *str_addr = reinterpret_cast<uint8_t*>(&reg);
 		register_t reg_type = type_to_register<Layout, MemA>();
 		return get_frame_read(reg_type, start_reg, (end_str - start_str) / sizeof(uint16_t));
 	}
