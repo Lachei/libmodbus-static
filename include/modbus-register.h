@@ -42,11 +42,11 @@ constexpr uint32_t popcount(std::span<const uint8_t> bytes) {
 // byte swapping for little endian systems
 template<typename T>
 struct swap_byte_order {
-	constexpr void operator()(T src, T& dst) const { 
+	constexpr void operator()(const T &src, T& dst) const { 
 		constexpr int s{sizeof(T)};
 		for (int byte: std::ranges::iota_view{0, s})
 			std::memcpy(reinterpret_cast<uint8_t*>(&dst) + (s - 1 - byte), 
-				reinterpret_cast<uint8_t*>(&src) + byte, sizeof(uint8_t)); 
+				reinterpret_cast<const uint8_t*>(&src) + byte, sizeof(uint8_t)); 
 	}
 };
 // no byte swapping for byte sequences and if system is big endian (same ordering as modbus bytes)
