@@ -48,7 +48,7 @@ struct modbus_actor: public modbus_register<Layout> {
 		std::span<uint8_t> data = io.read_bytes(max_timeout);
 		for (uint8_t b: data) {
 			if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU) {
-				state  = this->process_tcp(b).err;
+				state  = this->process_rtu(b).err;
 			} else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP) {
 				state  = this->process_tcp(b).err;
 			}
@@ -64,8 +64,8 @@ struct modbus_actor: public modbus_register<Layout> {
 					this->switch_to_request();
 					return state;
 				}
-			}
-			r_tie{frame, state} = this->get_frame_response();
+			} else
+				r_tie{frame, state} = this->get_frame_response();
 			if (state != OK) {
 				r_tie{frame, state} = this->get_frame_error_response(state);
 				if (state != OK) {
