@@ -136,8 +136,8 @@ template<int N>
 struct static_byte_vector {
 	std::array<uint8_t, N> storage{};
 	int cur_size{};
-	constexpr uint8_t& operator[](int i) { return storage[std::min(i, cur_size)]; }
-	constexpr const uint8_t& operator[](int i) const { return storage[std::min(i, cur_size)]; }
+	constexpr uint8_t& operator[](int i) { if (i < 0) return storage[std::max(0, cur_size - i)]; return storage[std::min(i, cur_size)]; }
+	constexpr const uint8_t& operator[](int i) const { if (i < 0) return storage[std::max(0, cur_size - i)]; return storage[std::min(i, cur_size)]; }
 	constexpr uint8_t* begin() { return storage.begin(); }
 	constexpr uint8_t* end() { return storage.begin() + cur_size; }
 	constexpr const uint8_t* begin() const { return storage.begin(); }

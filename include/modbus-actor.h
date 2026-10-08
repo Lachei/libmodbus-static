@@ -85,7 +85,7 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (this->addr != 0)
 			return CLIENT_CANT_QUERY;
 		if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU) {
-			if (result r = this->start_rtu_frame(this->addr); r != OK) return r;
+			if (result r = this->start_rtu_frame(addr); r != OK) return r;
 		} else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP) {
 			if (result r = this->start_tcp_frame(_tcp_trans++, addr); r != OK) return r;
 		}
@@ -96,6 +96,7 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (err != OK)
 			return err;
 		io.write_bytes(res);
+		this->switch_to_response();
 		auto start = std::chrono::steady_clock::now();
 		result state = IN_PROGRESS;
 		std::span<uint8_t> data{};
@@ -104,12 +105,13 @@ struct modbus_actor: public modbus_register<Layout> {
 				data = io.read_bytes(timeout - std::chrono::duration_cast<ms>(std::chrono::steady_clock::now() - start));
 			if (data.empty()) {
 				state = TIMEOUT;
-				continue;
+				break;
 			}
 			if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU)
 				state = this->process_rtu(data[0]).err;
 			else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP)
 				state = this->process_tcp(data[0]).err;
+			data = data.subspan(1);
 		}
 		return state;
 	}
@@ -133,18 +135,22 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (err != OK)
 			return err;
 		io.write_bytes(res);
+		this->switch_to_response();
 		auto start = std::chrono::steady_clock::now();
 		result state = IN_PROGRESS;
 		std::span<uint8_t> data{};
 		while (state == IN_PROGRESS && std::chrono::steady_clock::now() - start < timeout) {
 			if (data.empty())
 				data = io.read_bytes(timeout - (std::chrono::steady_clock::now() - start));
-			if (data.empty())
+			if (data.empty()) {
 				state = TIMEOUT;
+				break;
+			}
 			if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU)
 				state = this->process_rtu(data[0]).err;
 			else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP)
 				state = this->process_tcp(data[0]).err;
+			data = data.subspan(1);
 		}
 		return state;
 	}
@@ -166,18 +172,22 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (err != OK)
 			return err;
 		io.write_bytes(res);
+		this->switch_to_response();
 		auto start = std::chrono::steady_clock::now();
 		result state = IN_PROGRESS;
 		std::span<uint8_t> data{};
 		while (state == IN_PROGRESS && std::chrono::steady_clock::now() - start < timeout) {
 			if (data.empty())
 				data = io.read_bytes(timeout - (std::chrono::steady_clock::now() - start));
-			if (data.empty())
+			if (data.empty()) {
 				state = TIMEOUT;
+				break;
+			}
 			if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU)
 				state = this->process_rtu(data[0]).err;
 			else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP)
 				state = this->process_tcp(data[0]).err;
+			data = data.subspan(1);
 		}
 		return state;
 	}
@@ -201,18 +211,22 @@ struct modbus_actor: public modbus_register<Layout> {
 		if (err != OK)
 			return err;
 		io.write_bytes(res);
+		this->switch_to_response();
 		auto start = std::chrono::steady_clock::now();
 		result state = IN_PROGRESS;
 		std::span<uint8_t> data{};
 		while (state == IN_PROGRESS && std::chrono::steady_clock::now() - start < timeout) {
 			if (data.empty())
 				data = io.read_bytes(timeout - (std::chrono::steady_clock::now() - start));
-			if (data.empty())
+			if (data.empty()) {
 				state = TIMEOUT;
+				break;
+			}
 			if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::RTU)
 				state = this->process_rtu(data[0]).err;
 			else if constexpr (DATA_IO::TRANSPORT_TYPE == transport_t::TCP)
 				state = this->process_tcp(data[0]).err;
+			data = data.subspan(1);
 		}
 		return state;
 	}

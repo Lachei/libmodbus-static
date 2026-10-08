@@ -701,7 +701,7 @@ struct modbus_register {
 				case function_code::READ_HOLDING_REGISTERS:
 				case function_code::READ_INPUT_REGISTERS:
 					valid = lc.addr == response_lc.addr && lc.fc == response_lc.fc &&
-						is_bit ? (reg_count + 7) / 8 == l_byte(response_lc.i1): reg_count * 2 == l_byte(response_lc.i1);
+						(is_bit ? (reg_count + 7) / 8 == l_byte(response_lc.i1): reg_count * 2 == l_byte(response_lc.i1));
 					break;
 				default: break;
 			}
@@ -775,9 +775,9 @@ struct modbus_register {
 			.tcp_tid = buffer.tcp_header ? to_hb_first(buffer.tcp_header->transaction_id): uint16_t(0),
 			.addr = buffer.addr ? *buffer.addr: uint8_t(0),
 			.fc = buffer.fc ? function_code(*buffer.fc): function_code::NONE,
-			.i1 = *reinterpret_cast<uint16_t*>(buffer.fc + 1),
-			.i2 = *reinterpret_cast<uint16_t*>(buffer.fc + 3),
-			.crc = *(reinterpret_cast<uint16_t*>(buffer.frame_data.end()) - 1),
+			.i1 = (uint16_t(buffer.fc[2]) << 8) | buffer.fc[1],
+			.i2 = (uint16_t(buffer.fc[4]) << 8) | buffer.fc[3],
+			.crc = (uint16_t(buffer.frame_data[-1]) << 8) | buffer.frame_data[-2],
 		};
 	}
 	#undef RES_ERR_ASSERT
