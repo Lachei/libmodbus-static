@@ -241,7 +241,8 @@ struct modbus_frame {
 	}
 	constexpr result write_fc(function_code fc) {
 		RESULT_ASSERT(cur_state == state::WRITE_FC, "STATE_NOT_WRITE_FC");
-		RESULT_ASSERT(fc >= function_code::NONE && fc <= function_code::WRITE_MULTIPLE_REGISTERS,
+		// exception responses echo any function code (needed for ILLEGAL_FUNCTION responses)
+		RESULT_ASSERT(t.EXCEPTION || (fc >= function_code::NONE && fc <= function_code::WRITE_MULTIPLE_REGISTERS),
 				"INVALID_FUNCTION_CODE");
 		if (t.EXCEPTION)
 			reinterpret_cast<uint8_t&>(fc) |= 0x80;

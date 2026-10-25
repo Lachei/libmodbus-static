@@ -54,6 +54,12 @@ struct modbus_actor: public modbus_register<Layout> {
 			}
 			if (state == IN_PROGRESS)
 				continue;
+			// no response if the frame header is unknown, the crc is broken or another rtu device is addressed
+			if (state != OK && (this->lc.transport == transport_t::NONE || state == INVALID_CRC ||
+					(state == WRONG_ADDR && this->lc.transport != transport_t::TCP))) {
+				this->switch_to_request();
+				continue;
+			}
 			if (pre_data_send_cb)
 				pre_data_send_cb();
 			at_scope_end at_end{post_data_send_cb};

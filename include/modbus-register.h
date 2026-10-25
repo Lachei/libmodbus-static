@@ -261,7 +261,8 @@ struct modbus_register {
 		}
 		constexpr bool operator!=(const last_completed &o) const { return !(*this == o); }
 	} lc {};
-	
+	uint16_t tcp_skip{}; // remaining bytes of a broken/oversized tcp frame which have to be dropped to stay in sync
+
 
 	constexpr void switch_to_request() {
 		buffer.clear(); 
@@ -285,6 +286,10 @@ struct modbus_register {
 		return {.err = "NOT_YET_IMPLEMENTED"};
 	}
 	constexpr result_err process_tcp(uint8_t b) {
+		if (tcp_skip) {
+			--tcp_skip;
+			return {.err = IN_PROGRESS};
+		}
 		if (buffer.cur_state == modbus_frame<MAX_SIZE>::state::WRITE_ADDR_START_MBAP) {
 			if (buffer.frame_data.size() > int(sizeof(*buffer.tcp_header))) {
 				buffer.clear();
@@ -301,18 +306,33 @@ struct modbus_register {
 				uint16_t l = buffer.tcp_header->length;
 				buffer.tcp_header->length = (l_byte(l) << 8) | h_byte(l);
 				buffer.cur_state = modbus_frame<MAX_SIZE>::state::WRITE_ADDR;
+				uint16_t length = buffer.tcp_header->length;
+				if (length < 2 || length + sizeof(*buffer.tcp_header) > MAX_SIZE) {
+					// no usable header for a response, drop the whole frame
+					tcp_skip = length;
+					buffer.clear();
+					capture_header(0);
+					return {.err = "INVALID_TCP_FRAME_LENGTH"};
+				}
 			}
 			return {.err = IN_PROGRESS};
 		}
 		if (!buffer.tcp_header) {
 			buffer.clear();
+			capture_header(0);
 			return {.err = "FATAL_MISSING_TCP_HEADER_IN_FRAME"};
 		}
-		if (buffer.frame_data.size() > int(buffer.tcp_header->length + sizeof(*buffer.tcp_header))) {
+		// the mbap length is authoritative for the frame end, bytes left in this frame after b
+		int remaining = int(buffer.tcp_header->length + sizeof(*buffer.tcp_header)) - buffer.frame_data.size() - 1;
+		result_err r = _process(b);
+		if (r.err == IN_PROGRESS && remaining <= 0) {
+			capture_header(0);
 			buffer.clear();
-			return {.err = "FATAL_TCP_FRAME_LENGTH_FULL"};
+			return {.err = "TCP_FRAME_INCOMPLETE"};
 		}
-		return _process(b);
+		if (r.err != IN_PROGRESS && remaining > 0)
+			tcp_skip = remaining;
+		return r;
 	}
 
 	constexpr result start_rtu_frame(uint8_t addr) {
@@ -451,7 +471,7 @@ struct modbus_register {
 				buffer.clear();
 				return {.err = "LAYOUT_HAS_NO_HALFS"};
 			} else {
-				RES_FORWARD(is_bit_covered<decltype(storage.halfs_registers)>(reg_offset, reg_count));
+				RES_FORWARD(is_register_covered<decltype(storage.halfs_registers)>(reg_offset, reg_count));
 				RES_FORWARD(buffer.write_length(reg_count * 2));
 				uint8_t *start_addr = get_start_addr(storage.halfs_registers, reg_offset);
 				RES_FORWARD(buffer.write_data(std::span<uint8_t>{start_addr, reg_count * 2u}));
@@ -544,8 +564,12 @@ struct modbus_register {
 		}
 		RES_FORWARD(buffer.write_addr(lc.addr));
 		RES_FORWARD(buffer.write_fc(lc.fc));
-		if (err == REGISTER_NOT_FULLY_COVERED) {
+		if (err == REGISTER_NOT_FULLY_COVERED || err == BITS_NOT_FULLY_COVERED) {
 			RES_FORWARD(buffer.write_ec(exception_code::ILLEGAL_DATA_ADDRESS));
+		} else if (err == "INVALID_FUNCTION_CODE") {
+			RES_FORWARD(buffer.write_ec(exception_code::ILLEGAL_FUNCTION));
+		} else if (err == WRONG_ADDR) {
+			RES_FORWARD(buffer.write_ec(exception_code::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND));
 		} else {
 			RES_FORWARD(buffer.write_ec(exception_code::SLAVE_DEVICE_FAILURE));
 		}
@@ -677,6 +701,8 @@ struct modbus_register {
 	constexpr result_err _process(uint8_t b) {
 		result r = buffer.process(b);
 		if (r != OK) {
+			// keep the header of the failed frame for the error response (fc byte is not stored if it was invalid)
+			capture_header(b);
 			buffer.clear();
 			return {.err = r};
 		}
@@ -759,7 +785,11 @@ struct modbus_register {
 			}
 		} else {
 			// validation checks
-			if (response_lc.addr != addr) {
+			// modbus tcp: unit id 0xff (and 0) address the tcp device itself
+			bool addr_ok = response_lc.addr == addr || (response_lc.transport == transport_t::TCP &&
+					(response_lc.addr == 0 || response_lc.addr == 0xff));
+			if (!addr_ok) {
+				lc = response_lc;
 				buffer.clear();
 				return {.err = WRONG_ADDR};
 			}
@@ -770,6 +800,8 @@ struct modbus_register {
 	}
 
 	last_completed get_last_completed() {
+		if (!buffer.fc)
+			return {};
 		return last_completed{
 			.transport = buffer.transport,
 			.tcp_tid = buffer.tcp_header ? to_hb_first(buffer.tcp_header->transaction_id): uint16_t(0),
@@ -779,6 +811,19 @@ struct modbus_register {
 			.i2 = (uint16_t(buffer.fc[4]) << 8) | buffer.fc[3],
 			.crc = (uint16_t(buffer.frame_data[-1]) << 8) | buffer.frame_data[-2],
 		};
+	}
+	// stores the header of the current (possibly incomplete) frame in lc, used for error responses
+	constexpr void capture_header(uint8_t fc_byte) {
+		if (addr == 0)
+			return; // a client keeps its request in lc to validate the response
+		lc = last_completed{
+			.transport = buffer.transport,
+			.tcp_tid = buffer.tcp_header ? to_hb_first(buffer.tcp_header->transaction_id): uint16_t(0),
+			.addr = buffer.addr ? *buffer.addr: uint8_t(0),
+			.fc = function_code(buffer.fc ? *buffer.fc: fc_byte),
+		};
+		if (!buffer.addr)
+			lc.transport = transport_t::NONE; // nothing to respond to
 	}
 	#undef RES_ERR_ASSERT
 	#undef RES_FORWARD
